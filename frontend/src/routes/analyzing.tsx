@@ -1,0 +1,2 @@
+import { createFileRoute } from "@tanstack/react-router"; import { AnalyzingScreen } from "@/lib/ansme";
+export const Route = createFileRoute("/analyzing")({ head: () => ({ meta: [{ title: "Analyzing — ANSME" }, { name: "description", content: "ANSME is checking product details and reviews." }, { property: "og:title", content: "Analyzing — ANSME" }, { property: "og:description", content: "ANSME is checking product details and reviews." }, { property: "og:type", content: "website" }, { name: "twitter:card", content: "summary_large_image" }] }), component: AnalyzingScreen });

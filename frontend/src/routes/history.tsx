@@ -1,0 +1,2 @@
+import { createFileRoute } from "@tanstack/react-router"; import { HistoryScreen } from "@/lib/ansme";
+export const Route = createFileRoute("/history")({ head: () => ({ meta: [{ title: "History — ANSME" }, { name: "description", content: "Revisit your previous purchase decisions." }, { property: "og:title", content: "History — ANSME" }, { property: "og:description", content: "Revisit your previous purchase decisions." }, { property: "og:type", content: "website" }, { name: "twitter:card", content: "summary_large_image" }] }), component: HistoryScreen });

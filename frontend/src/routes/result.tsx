@@ -1,0 +1,2 @@
+import { createFileRoute } from "@tanstack/react-router"; import { ResultScreen } from "@/lib/ansme";
+export const Route = createFileRoute("/result")({ head: () => ({ meta: [{ title: "Your Verdict — ANSME" }, { name: "description", content: "A clear, evidence-based purchase verdict." }, { property: "og:title", content: "Your Verdict — ANSME" }, { property: "og:description", content: "A clear, evidence-based purchase verdict." }, { property: "og:type", content: "website" }, { name: "twitter:card", content: "summary_large_image" }] }), component: ResultScreen });

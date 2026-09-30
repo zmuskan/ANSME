@@ -1,0 +1,2 @@
+import { createFileRoute } from "@tanstack/react-router"; import { WorkspaceScreen } from "@/lib/ansme";
+export const Route = createFileRoute("/workspace")({ head: () => ({ meta: [{ title: "New Analysis — ANSME" }, { name: "description", content: "Analyze a product before you buy." }, { property: "og:title", content: "New Analysis — ANSME" }, { property: "og:description", content: "Analyze a product before you buy." }, { property: "og:type", content: "website" }, { name: "twitter:card", content: "summary_large_image" }] }), component: WorkspaceScreen });
