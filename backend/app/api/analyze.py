@@ -18,7 +18,7 @@ from typing import Any
 
 from fastapi import APIRouter, HTTPException
 
-from app.models.analysis import AnalyzeRequest
+from app.schemas.analyze import AnalyzeRequest
 from app.services.product_extractor import extract_product_data
 from app.services.verdict_engine import compute_verdict
 
