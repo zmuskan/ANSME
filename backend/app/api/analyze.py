@@ -16,8 +16,12 @@ import asyncio
 import logging
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
+from sqlalchemy.exc import SQLAlchemyError
+from sqlalchemy.orm import Session
 
+from app.db.database import get_db
+from app.models.analysis import Analysis
 from app.schemas.analyze import AnalyzeRequest
 from app.services.product_extractor import extract_product_data
 from app.services.verdict_engine import compute_verdict
@@ -34,7 +38,10 @@ _EXCLUDED_PRODUCT_FIELDS = frozenset({"cleaned_content"})
 
 
 @router.post("/analyze")
-async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
+async def analyze(
+    request: AnalyzeRequest,
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
     """
     Analyze one or more product URLs and return a deterministic verdict for each.
 
@@ -54,6 +61,34 @@ async def analyze(request: AnalyzeRequest) -> dict[str, Any]:
     products = await asyncio.gather(
         *(_process_url(url, request.budget, semaphore) for url in urls)
     )
+
+    successful_products = [product for product in products if product.get("status") == "success"]
+    if successful_products:
+        try:
+            db.add_all(
+                [
+                    Analysis(
+                        url=product["url"],
+                        title=product.get("title"),
+                        brand=product.get("brand"),
+                        price=product.get("price"),
+                        rating=product.get("rating"),
+                        image_url=product.get("image_url"),
+                        description=product.get("description"),
+                        overall_score=product["overall_score"],
+                        verdict=product["verdict"],
+                    )
+                    for product in successful_products
+                ]
+            )
+            db.commit()
+        except SQLAlchemyError as exc:
+            db.rollback()
+            logger.exception("Failed to save analysis results")
+            raise HTTPException(
+                status_code=500,
+                detail="Failed to save analysis results.",
+            ) from exc
 
     successful = sum(1 for p in products if p.get("status") == "success")
     failed = len(products) - successful
