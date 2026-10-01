@@ -6,7 +6,7 @@ Provides read access to previously saved analyses.
 
 from __future__ import annotations
 
-from fastapi import APIRouter, Depends, HTTPException
+from fastapi import APIRouter, Depends, HTTPException, status
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
@@ -77,4 +77,25 @@ def get_history_item(
         "overall_score": analysis.overall_score,
         "verdict": analysis.verdict,
         "created_at": analysis.created_at,
+    }
+
+
+@router.delete("/{analysis_id}")
+def delete_history_item(
+    analysis_id: int,
+    db: Session = Depends(get_db),
+):
+    """Delete a saved analysis by id."""
+    deleted = AnalysisRepository.delete_analysis(
+        db=db,
+        analysis_id=analysis_id,
+    )
+    if not deleted:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Analysis not found",
+        )
+    return {
+        "status": "success",
+        "message": f"Analysis {analysis_id} deleted successfully",
     }
