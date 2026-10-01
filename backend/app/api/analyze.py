@@ -3,11 +3,13 @@ Analyze API route.
 
 Wires the first end-to-end ANSME pipeline:
 
-    URL -> product_extractor -> verdict_engine -> structured response
+    URL -> product_extractor -> verdict_engine -> repository -> structured response
 
 All recommendations come from deterministic Python code. This module only
-receives the request, orchestrates the two services, and shapes the response.
-A failure on one URL never fails the whole request.
+receives the request, orchestrates the services, delegates persistence to the
+repository layer, and shapes the response. A failure on one URL never fails
+the whole request, and a failure to persist one result never affects the
+others.
 """
 
 from __future__ import annotations
@@ -21,7 +23,7 @@ from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.db.database import get_db
-from app.models.analysis import Analysis
+from app.repositories.analysis_repository import AnalysisRepository
 from app.schemas.analyze import AnalyzeRequest
 from app.services.product_extractor import extract_product_data
 from app.services.verdict_engine import compute_verdict
@@ -50,6 +52,10 @@ async def analyze(
     submitted URLs. URLs that cannot be processed appear in ``products`` with
     ``"status": "error"`` and an ``"error"`` message; the rest are unaffected.
 
+    Each successful result is persisted through ``AnalysisRepository``. A
+    persistence failure for one result is logged and does not affect the
+    other results or the response.
+
     Raises:
         HTTPException: 400 if no non-empty URL is provided.
     """
@@ -62,33 +68,7 @@ async def analyze(
         *(_process_url(url, request.budget, semaphore) for url in urls)
     )
 
-    successful_products = [product for product in products if product.get("status") == "success"]
-    if successful_products:
-        try:
-            db.add_all(
-                [
-                    Analysis(
-                        url=product["url"],
-                        title=product.get("title"),
-                        brand=product.get("brand"),
-                        price=product.get("price"),
-                        rating=product.get("rating"),
-                        image_url=product.get("image_url"),
-                        description=product.get("description"),
-                        overall_score=product["overall_score"],
-                        verdict=product["verdict"],
-                    )
-                    for product in successful_products
-                ]
-            )
-            db.commit()
-        except SQLAlchemyError as exc:
-            db.rollback()
-            logger.exception("Failed to save analysis results")
-            raise HTTPException(
-                status_code=500,
-                detail="Failed to save analysis results.",
-            ) from exc
+    _persist_successful_products(db, products)
 
     successful = sum(1 for p in products if p.get("status") == "success")
     failed = len(products) - successful
@@ -108,6 +88,44 @@ def _clean_urls(urls: list[str] | None) -> list[str]:
     if not urls:
         return []
     return [url.strip() for url in urls if isinstance(url, str) and url.strip()]
+
+
+def _persist_successful_products(
+    db: Session,
+    products: list[dict[str, Any]],
+) -> None:
+    """
+    Persist every successful product result via ``AnalysisRepository``.
+
+    Each result is saved independently. If one insert fails, the failure is
+    logged and processing continues with the remaining results, so one bad
+    row never prevents the others from being saved.
+    """
+    for product in products:
+        if product.get("status") != "success":
+            continue
+
+        try:
+            AnalysisRepository.create_analysis(db, _build_analysis_data(product))
+        except (SQLAlchemyError, KeyError, TypeError, ValueError):
+            logger.exception(
+                "Failed to save analysis result for %s", product.get("url")
+            )
+
+
+def _build_analysis_data(product: dict[str, Any]) -> dict[str, Any]:
+    """Map a successful product result to the column values for ``Analysis``."""
+    return {
+        "url": product["url"],
+        "title": product.get("title"),
+        "brand": product.get("brand"),
+        "price": product.get("price"),
+        "rating": product.get("rating"),
+        "image_url": product.get("image_url"),
+        "description": product.get("description"),
+        "overall_score": product["overall_score"],
+        "verdict": product["verdict"],
+    }
 
 
 async def _process_url(
