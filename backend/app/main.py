@@ -3,6 +3,8 @@ from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.health import router as health_router
 from app.api.analyze import router as analyze_router
+from app.db.database import Base, engine
+from app.models.analysis import Analysis
 
 app = FastAPI(
     title="ANSME Decision Engine",
@@ -19,6 +21,10 @@ app.add_middleware(
 
 app.include_router(health_router)
 app.include_router(analyze_router)
+
+@app.on_event("startup")
+def create_tables():
+    Base.metadata.create_all(bind=engine)
 
 @app.get("/")
 def root():
