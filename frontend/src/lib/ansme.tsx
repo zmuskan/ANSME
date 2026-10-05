@@ -1,7 +1,8 @@
 import { Link, useNavigate } from "@tanstack/react-router";
 import { motion } from "motion/react";
 import { Bell, Check, ChevronRight, Clock3, Download, Headphones, History, Home, Menu, Plus, Search, Settings, ShieldCheck, Sparkles, Trash2, Trophy, X } from "lucide-react";
-import { createContext, type FormEvent, type ReactNode, useContext, useEffect, useMemo, useState } from "react";
+import { createContext, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useContext, useEffect, useMemo, useState } from "react";
+import { analyzeProduct, deleteHistoryItem, getHistory, type HistoryRecord, type SuccessfulProduct } from "@/lib/api";
 import authAsset from "@/assets/01_auth_background.mp4";
 import authWebmAsset from "@/assets/01_auth_background.webm";
 import workspaceAsset from "@/assets/02_workspace_background.png";
@@ -12,23 +13,20 @@ import historyAsset from "@/assets/06_history_background.png";
 import settingsAsset from "@/assets/07_settings_background.png";
 
 export interface AnalysisRequest { urls: string[]; budget: string; requirements: string }
-export interface SingleResult { id: string; title: string; url: string; price: string; verdict: string; confidence: number; summary: string; pros: string[]; cons: string[]; bestFor: string; avoidIf: string; lifespan: string }
+export type SingleResult = SuccessfulProduct;
 export interface ComparisonResult { products: Array<{ name: string; price: string; pros: string[]; cons: string[] }>; winner: string; why: string; bestFor: string }
 export interface HistoryItem { id: string; title: string; date: string; verdict: string; price: string }
 export interface UserSettings { saveHistory: boolean; personalizedAdvice: boolean; notifications: boolean; theme: "system" | "dark" }
 
-type AppState = { request: AnalysisRequest; setRequest: (r: AnalysisRequest) => void; result: SingleResult; comparison: ComparisonResult; history: HistoryItem[]; settings: UserSettings; setSettings: (s: UserSettings) => void };
-const initialResult: SingleResult = { id: "ansme-001", title: "Everyday Wireless Headphones", url: "https://example.com/product", price: "$89.99", verdict: "Worth it", confidence: 91, summary: "Strong everyday value with reliable comfort and battery life. The compromises are minor at this price.", pros: ["Comfortable for long sessions", "Dependable battery", "Clear calls"], cons: ["Average case quality", "No premium codec"], bestFor: "Commutes, work, and casual listening", avoidIf: "You need studio-grade detail", lifespan: "3–4 years" };
-const comparisonProducts: ComparisonResult["products"] = [
-  { name: "Everyday", price: "₹7,499", pros: ["Sturdy build", "Clear calls"], cons: ["Basic carry case"] },
-  { name: "Comfort+", price: "₹7,699", pros: ["Softer fit", "Rich bass"], cons: ["Flimsier hinges"] },
-  { name: "Studio Lite", price: "₹8,199", pros: ["Detailed sound", "Useful controls"], cons: ["Tighter fit", "Costs more"] },
-];
+type AppState = { request: AnalysisRequest; setRequest: (r: AnalysisRequest) => void; result: SingleResult | null; setResult: (r: SingleResult) => void; comparison: ComparisonResult | null; setComparison: (c: ComparisonResult) => void; history: HistoryItem[]; setHistory: Dispatch<SetStateAction<HistoryItem[]>>; settings: UserSettings; setSettings: (s: UserSettings) => void };
 const AppContext = createContext<AppState | undefined>(undefined);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [request, setRequest] = useState<AnalysisRequest>({ urls: [], budget: "", requirements: "" });
+  const [result, setResult] = useState<SingleResult | null>(null);
+  const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [history, setHistory] = useState<HistoryItem[]>([]);
   const [settings, setSettings] = useState<UserSettings>({ saveHistory: true, personalizedAdvice: true, notifications: false, theme: "dark" });
-  const value = useMemo(() => ({ request, setRequest, result: { ...initialResult, url: request.urls[0] || initialResult.url }, comparison: { products: comparisonProducts.slice(0, Math.max(2, request.urls.length || 2)), winner: "Everyday", why: "It has the sturdier build, fewer recurring complaints, and gives up almost nothing for the lower price.", bestFor: "Anyone who wants dependable everyday headphones without paying extra for softer padding." }, history: [{ id: "ansme-001", title: "Everyday Wireless Headphones", date: "Today", verdict: "Worth It", price: "₹7,499" }, { id: "ansme-002", title: "Daily Trainer Sneakers", date: "Sep 24", verdict: "Maybe", price: "₹10,299" }, { id: "ansme-003", title: "Portable Espresso Maker", date: "Sep 18", verdict: "Skip", price: "₹5,699" }], settings, setSettings }), [request, settings]);
+  const value = useMemo(() => ({ request, setRequest, result, setResult, comparison, setComparison, history, setHistory, settings, setSettings }), [request, result, comparison, history, settings]);
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
 export function useAnsme() { const value = useContext(AppContext); if (!value) throw new Error("ANSME provider missing"); return value; }
@@ -45,13 +43,82 @@ export function AuthScreen() {
   return <main className="ansme-screen overflow-hidden"><div className="portrait-stage"><video className="screen-art" autoPlay muted loop playsInline><source src={authWebmAsset} type="video/webm" /><source src={authAsset} type="video/mp4" /></video><div className="auth-overlay"><Link to="/workspace" className="action-button google-button"><span className="google-g">G</span> Continue with Google</Link><Link to="/workspace" className="action-button guest-button">Continue as Guest</Link><div className="trust-line"><span><ShieldCheck className="size-4" />Research first. Regret less.</span><small>No spam. No bore. Just decisions.</small></div></div></div></main>;
 }
 export function WorkspaceScreen() {
-  const navigate = useNavigate(); const { request, setRequest } = useAnsme(); const [urls, setUrls] = useState<string[]>(request.urls.length ? request.urls : [""]);
+  const navigate = useNavigate(); const { request, setRequest, setResult, setComparison } = useAnsme(); const [urls, setUrls] = useState<string[]>(request.urls.length ? request.urls : [""]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null);
   function updateUrl(index: number, value: string) { setUrls((current) => current.map((url, urlIndex) => urlIndex === index ? value : url)); }
   function addUrl() { setUrls((current) => current.length < 3 ? [...current, ""] : current); }
   function removeUrl(index: number) { setUrls((current) => current.filter((_, urlIndex) => urlIndex !== index)); }
-  function submit(e: FormEvent) { e.preventDefault(); const validUrls = urls.map((url) => url.trim()).filter(Boolean); if (!validUrls.length) return; setRequest({ ...request, urls: validUrls }); navigate({ to: "/analyzing" }); }
-  const examples = [{ label: "H&M Hoodie", url: "https://example.com/hm-hoodie" }, { label: "MacBook Air", url: "https://example.com/macbook-air" }, { label: "Bangalore PG", url: "https://example.com/bangalore-pg" }, { label: "Skincare Product", url: "https://example.com/skincare" }, { label: "Online Course", url: "https://example.com/course" }];
-  return <Screen name="workspace"><motion.form initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel workspace-panel" onSubmit={submit}><div className="panel-heading"><p className="eyebrow">New analysis</p><h1>What are you thinking of buying?</h1></div><fieldset className="url-fieldset"><legend>Product URL{urls.length > 1 ? "s" : ""}</legend>{urls.map((url, index) => <div className="input-row" key={index}><input type="url" required value={url} onChange={(e) => updateUrl(index, e.target.value)} placeholder={`Paste product URL ${index + 1}`} aria-label={`Product URL ${index + 1}`} />{index === 0 && urls.length < 3 ? <button type="button" className="icon-button add-url" onClick={addUrl} aria-label="Add another product URL"><Plus /></button> : index > 0 ? <button type="button" className="icon-button" onClick={() => removeUrl(index)} aria-label={`Remove product URL ${index + 1}`}><X /></button> : null}</div>)}</fieldset><div className="chips" aria-label="Examples">{examples.map((example) => <button key={example.label} type="button" onClick={() => updateUrl(0, example.url)}>{example.label}</button>)}</div><label>Budget<input value={request.budget} onChange={(e) => setRequest({ ...request, budget: e.target.value })} placeholder="e.g. Under ₹10,000" /></label><label>What matters most?<textarea value={request.requirements} onChange={(e) => setRequest({ ...request, requirements: e.target.value })} placeholder="Comfort, durability, battery life…" /></label><button className="action-button primary-action" type="submit"><Sparkles className="size-5" />{urls.length > 1 ? "Compare" : "Analyze"}</button></motion.form></Screen>;
+  async function submit(e: FormEvent) {
+    e.preventDefault();
+    const validUrls = urls.map((url) => url.trim()).filter(Boolean);
+    if (!validUrls.length) return;
+    const firstUrl = validUrls[0];
+    if (!firstUrl) return;
+
+    setRequest({ ...request, urls: validUrls });
+    setError(null);
+    setLoading(true);
+
+    try {
+      const budget = parseBudget(request.budget);
+      if (validUrls.length === 1) {
+        const result = await analyzeProduct(firstUrl, budget, request.requirements);
+        console.log(result);
+        const product = result.products[0];
+        if (!product || product.status !== "success") {
+          throw new Error(product?.status === "error" ? product.error : "No product was analyzed.");
+        }
+        setResult(product);
+        navigate({ to: "/result" });
+        return;
+      }
+
+      const products = await Promise.all(validUrls.map(async (productUrl) => {
+        const result = await analyzeProduct(productUrl, budget, request.requirements);
+        console.log(result);
+        const product = result.products[0];
+        if (!product || product.status !== "success") {
+          throw new Error(product?.status === "error" ? product.error : `No result for ${productUrl}.`);
+        }
+        return product;
+      }));
+      const firstProduct = products[0];
+      if (!firstProduct) throw new Error("No products were analyzed.");
+      setResult(firstProduct);
+      const winner = products.reduce((best, product) => product.overall_score > best.overall_score ? product : best);
+      setComparison({
+        products: products.map((product) => ({
+          name: product.title || product.url,
+          price: formatPrice(product.price),
+          pros: product.analysis.pros,
+          cons: product.analysis.cons,
+        })),
+        winner: winner.title || winner.url,
+        why: winner.analysis.explanation,
+        bestFor: `Requirement match: ${winner.analysis.requirement_match}/10`,
+      });
+      navigate({ to: "/comparison" });
+    } catch (err) {
+      console.error(err);
+      setError(err instanceof Error ? err.message : "Analysis failed. Please try again.");
+    } finally {
+      setLoading(false);
+    }
+  }
+  const examples: { label: string; url: string }[] = [];
+  return <Screen name="workspace"><motion.form initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel workspace-panel" onSubmit={submit}><div className="panel-heading"><p className="eyebrow">New analysis</p><h1>What are you thinking of buying?</h1></div><fieldset className="url-fieldset"><legend>Product URL{urls.length > 1 ? "s" : ""}</legend>{urls.map((url, index) => <div className="input-row" key={index}><input type="url" required value={url} onChange={(e) => updateUrl(index, e.target.value)} placeholder={`Paste product URL ${index + 1}`} aria-label={`Product URL ${index + 1}`} />{index === 0 && urls.length < 3 ? <button type="button" className="icon-button add-url" onClick={addUrl} aria-label="Add another product URL"><Plus /></button> : index > 0 ? <button type="button" className="icon-button" onClick={() => removeUrl(index)} aria-label={`Remove product URL ${index + 1}`}><X /></button> : null}</div>)}</fieldset><div className="chips" aria-label="Examples">{examples.map((example) => <button key={example.label} type="button" onClick={() => updateUrl(0, example.url)}>{example.label}</button>)}</div><label>Budget<input value={request.budget} onChange={(e) => setRequest({ ...request, budget: e.target.value })} placeholder="e.g. Under ₹10,000" /></label><label>What matters most?<textarea value={request.requirements} onChange={(e) => setRequest({ ...request, requirements: e.target.value })} placeholder="Comfort, durability, battery life…" /></label>{error && <p className="analysis-error" role="alert">{error}</p>}<button className="action-button primary-action" type="submit" disabled={loading}><Sparkles className="size-5" />{loading ? "Analyzing…" : urls.length > 1 ? "Compare" : "Analyze"}</button></motion.form></Screen>;
+}
+function parseBudget(value: string): number | undefined {
+  const normalized = value.trim().toLowerCase().replace(/,/g, "");
+  if (!normalized) return undefined;
+  const match = normalized.match(/(\d+(?:\.\d+)?)\s*(k|m)?/);
+  if (!match) throw new Error("Enter a numeric budget, such as 10000 or 10k.");
+  const multiplier = match[2] === "k" ? 1_000 : match[2] === "m" ? 1_000_000 : 1;
+  const budget = Number(match[1]) * multiplier;
+  if (!Number.isFinite(budget) || budget <= 0) throw new Error("Budget must be greater than zero.");
+  return budget;
+}
+function formatPrice(price: number | null): string {
+  return price === null ? "Price unavailable" : price.toLocaleString();
 }
 export function AnalyzingScreen() {
   const navigate = useNavigate(); const { request } = useAnsme(); const [step, setStep] = useState(0); const items = ["Fetching product details", "Reading reviews", "Finding common complaints", "Checking requirements", "Generating verdict"];
@@ -61,11 +128,63 @@ export function AnalyzingScreen() {
 }
 export function ResultScreen() {
   const { result } = useAnsme();
-  return <Screen name="result" scroll><motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel result-panel"><p className="eyebrow">ANSME verdict</p><div className="verdict">{result.verdict.toUpperCase()}</div><p className="confidence">{result.confidence}% confident</p><div className="result-head"><div className="product-thumb"><Headphones /></div><div><h1>{result.title}</h1><a href={result.url} target="_blank" rel="noreferrer">View product <ChevronRight /></a></div><strong>{result.price}</strong></div><p className="result-summary">{result.summary}</p><div className="result-grid"><Info title="The good stuff" items={result.pros} positive /><Info title="The catches" items={result.cons} /></div><div className="friend-note"><strong>Who should buy it?</strong><p>{result.bestFor}.</p><strong>Who should skip it?</strong><p>{result.avoidIf}.</p></div><Link className="action-button primary-action" to="/comparison">Compare alternatives</Link></motion.section></Screen>;
+  if (!result) {
+    return <Screen name="result"><div className="glass-panel">No analysis available.</div></Screen>;
+  }
+  return <Screen name="result" scroll><motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel result-panel"><p className="eyebrow">ANSME verdict</p><div className="verdict">{result.verdict.toUpperCase()}</div><p className="confidence">{result.overall_score.toFixed(1)}/10 overall score</p><div className="result-head"><div className="product-thumb"><Headphones /></div><div><h1>{result.title}</h1><a href={result.url} target="_blank" rel="noreferrer">View product <ChevronRight /></a></div><strong>{formatPrice(result.price)}</strong></div><p className="result-summary">{result.analysis.explanation}</p><div className="result-grid"><Info title="The good stuff" items={result.analysis.pros} positive /><Info title="The catches" items={result.analysis.cons} /></div><div className="friend-note"><strong>Sentiment</strong><p>{result.analysis.sentiment_score}/10</p><strong>Requirements match</strong><p>{result.analysis.requirement_match}/10</p>{result.analysis.risk_flags.length > 0 && <><strong>Risks</strong><p>{result.analysis.risk_flags.join(", ")}</p></>}</div><Link className="action-button primary-action" to="/workspace">Analyze another</Link></motion.section></Screen>;
 }
 function Info({ title, items, text, positive }: { title: string; items?: string[]; text?: string; positive?: boolean }) { return <div className="info-block"><h2>{title}</h2>{items ? <ul>{items.map((item) => <li key={item}><span>{positive ? "+" : "−"}</span>{item}</li>)}</ul> : <p>{text}</p>}</div>; }
-export function ComparisonScreen() { const { comparison } = useAnsme(); return <Screen name="comparison" scroll><section className="glass-panel comparison-panel"><p className="eyebrow">Head-to-head</p><h1>Same vibe. Different price. <span>Which one wins?</span></h1><div className={`product-duel products-${comparison.products.length}`}>{comparison.products.map((product) => <article key={product.name}><div className="compare-image" role="img" aria-label={`${product.name} product image`}><Headphones /></div><h2>{product.name}</h2><strong className="compare-price">{product.price}</strong><div className="compare-points"><div><b>Pros</b>{product.pros.map((item) => <small key={item}>+ {item}</small>)}</div><div><b>Cons</b>{product.cons.map((item) => <small key={item}>− {item}</small>)}</div></div></article>)}</div><div className="winner"><Trophy /><div><small>ANSME PICK</small><strong>{comparison.winner}</strong><dl><dt>Why it wins</dt><dd>{comparison.why}</dd><dt>Best for</dt><dd>{comparison.bestFor}</dd></dl></div></div><Link className="action-button primary-action" to="/workspace">Analyze another</Link></section></Screen>; }
-export function HistoryScreen() { const { history } = useAnsme(); const [search, setSearch] = useState(""); const filtered = history.filter((item) => item.title.toLowerCase().includes(search.toLowerCase())); return <Screen name="history" scroll><section className="glass-panel history-panel"><p className="eyebrow">Decision archive</p><h1>Your past calls</h1><label className="search-box"><Search /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search analyses" /></label><div className="history-list">{filtered.map((item) => <article key={item.id}><div><small><Clock3 />{item.date}</small><h2>{item.title}</h2><p>{item.price}</p></div><div><span className={`verdict-badge ${item.verdict.toLowerCase().replace(" ", "-")}`}>{item.verdict}</span><Link to="/result">Reopen <ChevronRight /></Link></div></article>)}</div><Link to="/workspace" className="action-button primary-action"><Plus />New analysis</Link></section></Screen>; }
+export function ComparisonScreen() { const { comparison } = useAnsme(); if (!comparison) { return <Screen name="comparison"><div className="glass-panel">No comparison available.</div></Screen>; } return <Screen name="comparison" scroll><section className="glass-panel comparison-panel"><p className="eyebrow">Head-to-head</p><h1>Same vibe. Different price. <span>Which one wins?</span></h1><div className={`product-duel products-${comparison.products.length}`}>{comparison.products.map((product) => <article key={product.name}><div className="compare-image" role="img" aria-label={`${product.name} product image`}><Headphones /></div><h2>{product.name}</h2><strong className="compare-price">{product.price}</strong><div className="compare-points"><div><b>Pros</b>{product.pros.map((item) => <small key={item}>+ {item}</small>)}</div><div><b>Cons</b>{product.cons.map((item) => <small key={item}>− {item}</small>)}</div></div></article>)}</div><div className="winner"><Trophy /><div><small>ANSME PICK</small><strong>{comparison.winner}</strong><dl><dt>Why it wins</dt><dd>{comparison.why}</dd><dt>Best for</dt><dd>{comparison.bestFor}</dd></dl></div></div><Link className="action-button primary-action" to="/workspace">Analyze another</Link></section></Screen>; }
+export function HistoryScreen() {
+  const { history, setHistory } = useAnsme();
+  const [search, setSearch] = useState("");
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    let cancelled = false;
+    async function loadHistory() {
+      try {
+        const data = await getHistory();
+        if (!cancelled) {
+          setHistory(data.map(mapHistoryRecord));
+        }
+      } catch (err) {
+        console.error(err);
+        if (!cancelled) {
+          setError("Unable to load analysis history.");
+        }
+      }
+    }
+
+    void loadHistory();
+    return () => {
+      cancelled = true;
+    };
+  }, [setHistory]);
+
+  async function handleDelete(id: string) {
+    try {
+      await deleteHistoryItem(Number(id));
+      setHistory((current) => current.filter((item) => item.id !== id));
+    } catch (err) {
+      console.error(err);
+      setError("Unable to delete this analysis.");
+    }
+  }
+
+  const filtered = history.filter((item) => item.title.toLowerCase().includes(search.toLowerCase()));
+  return <Screen name="history" scroll><section className="glass-panel history-panel"><p className="eyebrow">Decision archive</p><h1>Your past calls</h1><label className="search-box"><Search /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search analyses" /></label>{error && <p className="analysis-error" role="alert">{error}</p>}<div className="history-list">{filtered.map((item) => <article key={item.id}><div><small><Clock3 />{item.date}</small><h2>{item.title}</h2><p>{item.price}</p></div><div><span className={`verdict-badge ${item.verdict.toLowerCase().replace(" ", "-")}`}>{item.verdict}</span><Link to="/result">Reopen <ChevronRight /></Link><button type="button" className="icon-button" aria-label={`Delete ${item.title}`} onClick={() => void handleDelete(item.id)}><Trash2 /></button></div></article>)}</div><Link to="/workspace" className="action-button primary-action"><Plus />New analysis</Link></section></Screen>;
+}
+
+function mapHistoryRecord(item: HistoryRecord): HistoryItem {
+  return {
+    id: String(item.id),
+    title: item.title ?? item.url,
+    date: new Date(item.created_at).toLocaleDateString(),
+    verdict: item.verdict,
+    price: item.price === null ? "Price unavailable" : `₹${item.price.toLocaleString("en-IN")}`,
+  };
+}
 const legal = { privacy: { title: "Privacy", body: "Your product links and preferences are used only to create your analysis. You control whether analysis history is saved." }, terms: { title: "Terms", body: "ANSME provides research-based guidance, not a guarantee. Prices, availability, and product details may change." }, disclaimer: { title: "Disclaimer", body: "Verdicts are informational and should be one input in your decision. Always review current seller terms and safety guidance." } };
 export function SettingsScreen() { const { settings, setSettings } = useAnsme(); const [tab, setTab] = useState<"settings" | keyof typeof legal>("settings"); return <Screen name="settings" scroll><section className="glass-panel settings-panel"><div className="tabs">{(["settings", "privacy", "terms", "disclaimer"] as const).map((name) => <button key={name} className={tab === name ? "active" : ""} onClick={() => setTab(name)}>{name}</button>)}</div>{tab === "settings" ? <><p className="eyebrow">Your rules</p><h1>Settings</h1><div className="setting-list"><Toggle label="Save analysis history" value={settings.saveHistory} onChange={(value) => setSettings({ ...settings, saveHistory: value })} /><Toggle label="Personalized advice" value={settings.personalizedAdvice} onChange={(value) => setSettings({ ...settings, personalizedAdvice: value })} /><Toggle label="Notifications" value={settings.notifications} onChange={(value) => setSettings({ ...settings, notifications: value })} icon={<Bell />} /><label className="theme-row"><span>Theme preference</span><select value={settings.theme} onChange={(e) => setSettings({ ...settings, theme: e.target.value as UserSettings["theme"] })}><option value="dark">Dark</option><option value="system">Use device setting</option></select></label></div><div className="data-actions"><button type="button"><Download />Export data</button><button type="button" className="danger-action"><Trash2 />Delete data</button></div><p className="privacy-note"><ShieldCheck />Your data, your call.</p></> : <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="legal-copy"><p className="eyebrow">ANSME</p><h1>{legal[tab].title}</h1><p>{legal[tab].body}</p><p>We keep our language clear, collect only what the experience needs, and never sell personal information.</p></motion.div>}</section></Screen>; }
 function Toggle({ label, value, onChange, icon }: { label: string; value: boolean; onChange: (value: boolean) => void; icon?: ReactNode }) { return <label className="toggle-row"><span>{icon}{label}</span><button type="button" role="switch" aria-checked={value} aria-label={label} className={value ? "on" : ""} onClick={() => onChange(!value)}><span /></button></label>; }

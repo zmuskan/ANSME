@@ -24,7 +24,9 @@ from sqlalchemy.orm import Session
 
 from app.db.database import get_db
 from app.repositories.analysis_repository import AnalysisRepository
+from app.repositories.evidence_repository import EvidenceRepository
 from app.schemas.analyze import AnalyzeRequest
+from app.services.analysis_engine import analyze_product
 from app.services.product_extractor import extract_product_data
 from app.services.verdict_engine import compute_verdict
 
@@ -65,7 +67,10 @@ async def analyze(
 
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
     products = await asyncio.gather(
-        *(_process_url(url, request.budget, semaphore) for url in urls)
+        *(
+            _process_url(url, request.budget, semaphore, request.requirements)
+            for url in urls
+        )
     )
 
     _persist_successful_products(db, products)
@@ -106,7 +111,25 @@ def _persist_successful_products(
             continue
 
         try:
-            AnalysisRepository.create_analysis(db, _build_analysis_data(product))
+            analysis = AnalysisRepository.create_analysis(
+                db,
+                _build_analysis_data(product),
+            )
+            analysis_details = product.get("analysis") or {}
+            for pro in analysis_details.get("pros", []):
+                EvidenceRepository.create(
+                    db=db,
+                    analysis_id=analysis.id,
+                    source_type="pro",
+                    evidence_text=pro,
+                )
+            for con in analysis_details.get("cons", []):
+                EvidenceRepository.create(
+                    db=db,
+                    analysis_id=analysis.id,
+                    source_type="con",
+                    evidence_text=con,
+                )
         except (SQLAlchemyError, KeyError, TypeError, ValueError):
             logger.exception(
                 "Failed to save analysis result for %s", product.get("url")
@@ -132,6 +155,7 @@ async def _process_url(
     url: str,
     budget: float | None,
     semaphore: asyncio.Semaphore,
+    requirements: str | None = None,
 ) -> dict[str, Any]:
     """
     Run the full pipeline for one URL without ever raising.
@@ -146,12 +170,22 @@ async def _process_url(
         if not isinstance(product, dict) or product.get("status") != "success":
             return _build_error(url, product)
 
+        analysis = analyze_product(
+            title=product.get("title"),
+            description=product.get("description"),
+            price=product.get("price"),
+            rating=product.get("rating"),
+            requirements=requirements,
+        )
         verdict = compute_verdict(
             price=product.get("price"),
             rating=product.get("rating"),
             budget=budget,
         )
-        return _merge_product_and_verdict(product, verdict)
+        
+        result = _merge_product_and_verdict(product, verdict)
+        result["analysis"] = analysis
+        return result
     except Exception as exc:  # noqa: BLE001 - one bad URL must not fail the request
         logger.exception("Unexpected failure while analyzing %s", url)
         return {

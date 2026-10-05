@@ -9,7 +9,9 @@ from __future__ import annotations
 from datetime import datetime
 
 from sqlalchemy import DateTime, Float, Integer, String, Text, func
-from sqlalchemy.orm import Mapped, mapped_column
+from sqlalchemy.orm import Mapped
+from sqlalchemy.orm import mapped_column
+from sqlalchemy.orm import relationship
 
 from app.db.database import Base
 
@@ -19,16 +21,64 @@ class Analysis(Base):
 
     __tablename__ = "analyses"
 
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    url: Mapped[str] = mapped_column(Text, nullable=False)
-    title: Mapped[str | None] = mapped_column(Text, nullable=True)
-    brand: Mapped[str | None] = mapped_column(Text, nullable=True)
-    price: Mapped[float | None] = mapped_column(Float, nullable=True)
-    rating: Mapped[float | None] = mapped_column(Float, nullable=True)
-    image_url: Mapped[str | None] = mapped_column(Text, nullable=True)
-    description: Mapped[str | None] = mapped_column(Text, nullable=True)
-    overall_score: Mapped[float] = mapped_column(Float, nullable=False)
-    verdict: Mapped[str] = mapped_column(String(50), nullable=False)
+    id: Mapped[int] = mapped_column(
+        Integer,
+        primary_key=True,
+        autoincrement=True,
+    )
+
+    url: Mapped[str] = mapped_column(
+        Text,
+        nullable=False,
+    )
+
+    title: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    brand: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    price: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    rating: Mapped[float | None] = mapped_column(
+        Float,
+        nullable=True,
+    )
+
+    image_url: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    description: Mapped[str | None] = mapped_column(
+        Text,
+        nullable=True,
+    )
+
+    overall_score: Mapped[float] = mapped_column(
+        Float,
+        nullable=False,
+    )
+
+    verdict: Mapped[str] = mapped_column(
+        String(50),
+        nullable=False,
+    )
+
     created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), server_default=func.now()
+        DateTime(timezone=True),
+        server_default=func.now(),
+    )
+
+    evidence = relationship(
+        "Evidence",
+        cascade="all, delete-orphan",
+        passive_deletes=True,
     )

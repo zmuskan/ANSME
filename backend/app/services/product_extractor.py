@@ -430,9 +430,9 @@ def _extract_brand(soup: BeautifulSoup, product: dict | None) -> str | None:
         return brand
 
     # Microdata: <span itemprop="brand">Acme</span> (or nested itemprop="name")
-    node = soup.find(attrs={"itemprop": "brand"})
+    node = soup.find(itemprop="brand")
     if node:
-        inner = node.find(attrs={"itemprop": "name"})
+        inner = node.select_one('[itemprop="name"]')
         text = _clean_text((inner or node).get("content") or (inner or node).get_text(" "))
         if text:
             return text
@@ -525,7 +525,11 @@ def _extract_price(
             return price
 
     for node in soup.select('[itemprop="price"]'):
-        raw = node.get("content") or node.get("value") or node.get_text(" ")
+        raw_value = node.get("content") or node.get("value") or node.get_text(" ")
+        if isinstance(raw_value, (list, tuple)):
+            raw = " ".join(str(part) for part in raw_value)
+        else:
+            raw = str(raw_value)
         price = _parse_price_string(raw)
         if price is not None:
             return price
@@ -618,12 +622,15 @@ def _first_large_image(soup: BeautifulSoup, base_url: str) -> str | None:
     unsized_fallback: str | None = None
 
     for img in soup.find_all("img"):
-        src = (
+        src_value = (
             img.get("src")
             or img.get("data-src")
             or img.get("data-lazy-src")
             or img.get("data-original")
         )
+        if not isinstance(src_value, str):
+            continue
+        src = src_value
         if not src or _SKIP_IMAGE_RE.search(src):
             continue
         if src.lower().split("?")[0].endswith((".svg", ".gif")):

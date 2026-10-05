@@ -19,6 +19,9 @@ from typing import Any
 from sqlalchemy import create_engine
 from sqlalchemy.engine import Engine, make_url
 from sqlalchemy.orm import DeclarativeBase, Session, sessionmaker
+from dotenv import load_dotenv
+
+load_dotenv()
 
 __all__ = ["Base", "SessionLocal", "engine", "get_db"]
 
@@ -90,3 +93,5 @@ def get_db() -> Generator[Session, None, None]:
         yield db
     finally:
         db.close()
+
+   
