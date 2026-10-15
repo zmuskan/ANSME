@@ -6,6 +6,7 @@ from sqlalchemy import ForeignKey
 from sqlalchemy import Integer
 from sqlalchemy import String
 from sqlalchemy import Text
+from sqlalchemy import Float
 from sqlalchemy.sql import func
 
 from app.db.database import Base
@@ -38,6 +39,13 @@ class Evidence(Base):
     evidence_text = Column(
         Text,
         nullable=False,
+    )
+
+    quality_score = Column(
+        Float,
+        nullable=False,
+        default=0,
+        server_default="0",
     )
 
     created_at = Column(

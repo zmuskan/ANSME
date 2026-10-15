@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from typing import Any
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
+from sqlalchemy.orm import Session
 
+from app.db.database import get_db
+from app.repositories.analysis_repository import AnalysisRepository
 from app.services.comparison_engine import compare_products
 from app.services.explanation_engine import generate_explanation
 from app.services.review_analysis_engine import analyze_reviews
@@ -66,6 +69,15 @@ async def review_analysis(
 # ------------------------------------------------------------------
 # Product Comparison
 # ------------------------------------------------------------------
+
+
+@router.get("")
+async def analytics_summary(
+    days: int | None = Query(default=None, ge=1, le=3650),
+    db: Session = Depends(get_db),
+) -> dict[str, Any]:
+    """Return aggregated analytics, optionally limited to recent days."""
+    return AnalysisRepository.get_analytics(db, days=days)
 
 
 @router.post("/compare")

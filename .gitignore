@@ -1,7 +1,24 @@
+# Environment variables and secrets
 .env
+.env.*
+!.env.example
+
+# Python environments and generated files
 .venv/
 venv/
 __pycache__/
-*.pyc
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+
+# Node and frontend build output
 node_modules/
 dist/
+dist-ssr/
+build/
+*.tsbuildinfo
+
+# Logs and local machine files
+*.log
+.DS_Store
+Thumbs.db

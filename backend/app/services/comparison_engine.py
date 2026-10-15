@@ -14,7 +14,8 @@ Winner rules (applied in order):
     1. Higher ``overall_score`` wins, unless the gap is within
        ``SCORE_TIE_TOLERANCE``.
     2. Otherwise the higher ``rating`` wins.
-    3. Otherwise the lower ``price`` wins.
+    3. Otherwise the lower ``price`` wins when both source currencies are
+       known and match.
     4. Otherwise the result is a ``"tie"``.
 """
 
@@ -39,7 +40,8 @@ def compare_products(
 
     Args:
         product_a: First product. Recognised keys: ``title``, ``price``,
-            ``rating``, ``overall_score``, ``verdict``. All are optional.
+            ``price_currency``, ``rating``, ``overall_score``, ``verdict``.
+            All are optional.
         product_b: Second product, with the same keys.
 
     Returns:
@@ -59,10 +61,23 @@ def compare_products(
     score_b = _score_or_zero(product_b)
     price_a = _to_float(product_a.get("price"))
     price_b = _to_float(product_b.get("price"))
+    currencies_match = _currencies_match(product_a, product_b)
+    prices_comparable = _prices_comparable(product_a, product_b)
+    comparable_price_a = price_a if prices_comparable else None
+    comparable_price_b = price_b if prices_comparable else None
+    price_a_for_display = price_a if currencies_match else None
+    price_b_for_display = price_b if currencies_match else None
     rating_a = _to_float(product_a.get("rating"))
     rating_b = _to_float(product_b.get("rating"))
 
-    winner_key = _pick_winner_key(score_a, score_b, rating_a, rating_b, price_a, price_b)
+    winner_key = _pick_winner_key(
+        score_a,
+        score_b,
+        rating_a,
+        rating_b,
+        comparable_price_a,
+        comparable_price_b,
+    )
     winner_title = name_a if winner_key == "product_a" else (name_b if winner_key == "product_b" else "tie")
 
     return {
@@ -72,20 +87,44 @@ def compare_products(
         "dimension_winners": {
             "overall_winner": _dimension_winner(score_a, score_b, name_a, name_b, higher_is_better=True),
             "rating_winner": _dimension_winner(rating_a, rating_b, name_a, name_b, higher_is_better=True),
-            "price_winner": _dimension_winner(price_a, price_b, name_a, name_b, higher_is_better=False),
+            "price_winner": _dimension_winner(
+                comparable_price_a,
+                comparable_price_b,
+                name_a,
+                name_b,
+                higher_is_better=False,
+            ),
         },
         "comparison": {
-            "price": _compare_price(price_a, price_b, name_a, name_b),
+            "price": _compare_price(
+                price_a_for_display,
+                price_b_for_display,
+                name_a,
+                name_b,
+                currencies_match,
+            ),
             "rating": _compare_rating(rating_a, rating_b, name_a, name_b),
             "overall": _compare_overall(product_a, product_b, name_a, name_b, score_a, score_b),
         },
         "strengths_and_weaknesses": {
-            "product_a": _extract_traits(product_a, product_b, score_a, score_b, price_a, price_b, rating_a, rating_b),
-            "product_b": _extract_traits(product_b, product_a, score_b, score_a, price_b, price_a, rating_b, rating_a),
+            "product_a": _extract_traits(product_a, product_b, score_a, score_b, comparable_price_a, comparable_price_b, rating_a, rating_b),
+            "product_b": _extract_traits(product_b, product_a, score_b, score_a, comparable_price_b, comparable_price_a, rating_b, rating_a),
         },
         "evidence": {
-            "product_a": {"title": name_a, "price": price_a, "rating": rating_a, "overall_score": score_a},
-            "product_b": {"title": name_b, "price": price_b, "rating": rating_b, "overall_score": score_b},
+            "product_a": {
+                "title": name_a,
+                "price": price_a,
+                "price_currency": product_a.get("price_currency"),
+                "rating": rating_a,
+                "overall_score": score_a,
+            },
+            "product_b": {
+                "title": name_b,
+                "price": price_b,
+                "price_currency": product_b.get("price_currency"),
+                "rating": rating_b,
+                "overall_score": score_b,
+            },
         },
     }
 
@@ -193,8 +232,11 @@ def _compare_price(
     price_b: float | None,
     name_a: str,
     name_b: str,
+    prices_comparable: bool,
 ) -> str:
     """Describe the price relationship (lower price is better)."""
+    if not prices_comparable:
+        return "Price differences are omitted because a known shared currency is unavailable."
     if price_a is None and price_b is None:
         return "Price is unavailable for both products."
     if price_a is None:
@@ -214,6 +256,35 @@ def _compare_price(
     if high > 0:
         sentence += f" ({difference / high * 100:.1f}% less than {pricier})"
     return sentence + "."
+
+
+def _prices_comparable(
+    product_a: Mapping[str, Any],
+    product_b: Mapping[str, Any],
+) -> bool:
+    """Only compare prices when both source currencies and amounts are known."""
+    return (
+        _currencies_match(product_a, product_b)
+        and _to_float(product_a.get("price")) is not None
+        and _to_float(product_b.get("price")) is not None
+    )
+
+
+def _currencies_match(
+    product_a: Mapping[str, Any],
+    product_b: Mapping[str, Any],
+) -> bool:
+    """Check whether both source currencies are known and match."""
+    currency_a = product_a.get("price_currency")
+    currency_b = product_b.get("price_currency")
+    return (
+        isinstance(currency_a, str)
+        and isinstance(currency_b, str)
+        and len(currency_a.strip()) == 3
+        and currency_a.strip().isascii()
+        and currency_a.strip().isalpha()
+        and currency_a.strip().upper() == currency_b.strip().upper()
+    )
 
 
 def _compare_rating(

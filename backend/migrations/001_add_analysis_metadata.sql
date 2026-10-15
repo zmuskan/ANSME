@@ -1,0 +1,5 @@
+ALTER TABLE analyses
+    ADD COLUMN IF NOT EXISTS metrics JSON,
+    ADD COLUMN IF NOT EXISTS score_breakdown JSON,
+    ADD COLUMN IF NOT EXISTS processing_time_ms INTEGER,
+    ADD COLUMN IF NOT EXISTS sources_analyzed INTEGER NOT NULL DEFAULT 1;

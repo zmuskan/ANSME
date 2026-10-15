@@ -16,16 +16,20 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import time
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
+from app.auth import get_current_user_id
 from app.db.database import get_db
 from app.repositories.analysis_repository import AnalysisRepository
 from app.repositories.evidence_repository import EvidenceRepository
-from app.schemas.analyze import AnalyzeRequest
+from app.repositories.price_history_repository import PriceHistoryRepository
+from app.schemas.analyze import AnalyzeRequest, EvidenceResponse
 from app.services.analysis_engine import analyze_product
 from app.services.product_extractor import extract_product_data
 from app.services.verdict_engine import compute_verdict
@@ -45,6 +49,7 @@ _EXCLUDED_PRODUCT_FIELDS = frozenset({"cleaned_content"})
 async def analyze(
     request: AnalyzeRequest,
     db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     """
     Analyze one or more product URLs and return a deterministic verdict for each.
@@ -73,7 +78,7 @@ async def analyze(
         )
     )
 
-    _persist_successful_products(db, products)
+    _persist_successful_products(db, products, user_id)
 
     successful = sum(1 for p in products if p.get("status") == "success")
     failed = len(products) - successful
@@ -98,6 +103,7 @@ def _clean_urls(urls: list[str] | None) -> list[str]:
 def _persist_successful_products(
     db: Session,
     products: list[dict[str, Any]],
+    user_id: UUID,
 ) -> None:
     """
     Persist every successful product result via ``AnalysisRepository``.
@@ -113,8 +119,16 @@ def _persist_successful_products(
         try:
             analysis = AnalysisRepository.create_analysis(
                 db,
-                _build_analysis_data(product),
+                _build_analysis_data(product, user_id),
             )
+            if product.get("price") is not None:
+                PriceHistoryRepository.create(
+                    db,
+                    analysis_id=analysis.id,
+                    price=float(product["price"]),
+                    price_raw=product.get("price_raw"),
+                    price_currency=product.get("price_currency"),
+                )
             analysis_details = product.get("analysis") or {}
             for pro in analysis_details.get("pros", []):
                 EvidenceRepository.create(
@@ -122,6 +136,7 @@ def _persist_successful_products(
                     analysis_id=analysis.id,
                     source_type="pro",
                     evidence_text=pro,
+                    quality_score=_evidence_quality(product, pro),
                 )
             for con in analysis_details.get("cons", []):
                 EvidenceRepository.create(
@@ -129,25 +144,57 @@ def _persist_successful_products(
                     analysis_id=analysis.id,
                     source_type="con",
                     evidence_text=con,
+                    quality_score=_evidence_quality(product, con),
                 )
+            product["price_history"] = PriceHistoryRepository.for_analysis(db, analysis)
+            product["similar_products"] = [
+                {
+                    "id": item.id,
+                    "title": item.title,
+                    "url": item.url,
+                    "price": item.price,
+                    "overall_score": item.overall_score,
+                    "verdict": item.verdict,
+                }
+                for item in AnalysisRepository.find_similar(db, analysis, user_id)
+            ]
         except (SQLAlchemyError, KeyError, TypeError, ValueError):
             logger.exception(
                 "Failed to save analysis result for %s", product.get("url")
             )
 
 
-def _build_analysis_data(product: dict[str, Any]) -> dict[str, Any]:
+def _build_analysis_data(
+    product: dict[str, Any],
+    user_id: UUID,
+) -> dict[str, Any]:
     """Map a successful product result to the column values for ``Analysis``."""
+    analysis_details = product.get("analysis") or {}
     return {
+        "user_id": user_id,
         "url": product["url"],
         "title": product.get("title"),
         "brand": product.get("brand"),
         "price": product.get("price"),
+        "price_raw": product.get("price_raw"),
+        "price_currency": product.get("price_currency"),
         "rating": product.get("rating"),
         "image_url": product.get("image_url"),
         "description": product.get("description"),
         "overall_score": product["overall_score"],
         "verdict": product["verdict"],
+        "sentiment_score": analysis_details.get("sentiment_score"),
+        "requirement_match": analysis_details.get("requirement_match"),
+        "pros": analysis_details.get("pros"),
+        "cons": analysis_details.get("cons"),
+        "risk_flags": analysis_details.get("risk_flags"),
+        "explanation": analysis_details.get("explanation"),
+        "metrics": product.get("metrics"),
+        "score_breakdown": product.get("score_breakdown"),
+        "processing_time_ms": product.get("processing_time_ms", 0),
+        "sources_analyzed": product.get("sources_analyzed", 0),
+        "review_count": product.get("review_count"),
+        "category": product.get("category", "Other"),
     }
 
 
@@ -163,6 +210,7 @@ async def _process_url(
     Returns the merged product + verdict dictionary on success, or an error
     dictionary (``url``, ``status``, ``error``) on failure.
     """
+    start_time = time.perf_counter()
     try:
         async with semaphore:
             product = await extract_product_data(url)
@@ -185,6 +233,28 @@ async def _process_url(
         
         result = _merge_product_and_verdict(product, verdict)
         result["analysis"] = analysis
+        result["sources_analyzed"] = 1
+        result["category"] = _classify_category(
+            f"{product.get('title') or ''} {product.get('description') or ''}"
+        )
+        result["score_breakdown"] = _build_score_breakdown(verdict.get("metrics", {}))
+        result["evidence"] = _build_evidence_response(result)
+        result["processing_time_ms"] = int((time.perf_counter() - start_time) * 1000)
+        result["price_history"] = {
+            "history": (
+                [{
+                    "price": product["price"],
+                    "price_raw": product.get("price_raw"),
+                    "price_currency": product.get("price_currency"),
+                    "captured_at": None,
+                }]
+                if product.get("price") is not None
+                else []
+            ),
+            "lowest_seen": product.get("price"),
+            "highest_seen": product.get("price"),
+            "common_currency": product.get("price_currency"),
+        }
         return result
     except Exception as exc:  # noqa: BLE001 - one bad URL must not fail the request
         logger.exception("Unexpected failure while analyzing %s", url)
@@ -201,6 +271,64 @@ def _build_error(url: str, product: Any) -> dict[str, Any]:
     if isinstance(product, dict):
         message = str(product.get("error") or message)
     return {"url": url, "status": "error", "error": message}
+
+
+def _build_score_breakdown(metrics: dict[str, Any]) -> dict[str, float]:
+    """Return weighted score contributions from the verdict engine metrics."""
+    return {
+        "Value contribution": round(float(metrics.get("value_score", 0)) * 0.45, 2),
+        "Rating contribution": round(float(metrics.get("rating_score", 0)) * 0.45, 2),
+        "Confidence contribution": round(
+            float(metrics.get("confidence_score", 0)) * 0.10,
+            2,
+        ),
+    }
+
+
+def _build_evidence_response(product: dict[str, Any]) -> list[dict[str, Any]]:
+    """Link generated pros and cons to the product page they were derived from."""
+    analysis = product.get("analysis") or {}
+    evidence = [
+        EvidenceResponse(
+            title=product.get("title") or product["url"],
+            url=product["url"],
+            source=source,
+            score=float(product.get("overall_score", 0)),
+            snippet=snippet,
+            quality_score=_evidence_quality(product, snippet),
+        ).model_dump()
+        for source, key in (("Strength", "pros"), ("Concern", "cons"))
+        for snippet in analysis.get(key, [])
+    ]
+    return evidence
+
+
+def _evidence_quality(product: dict[str, Any], snippet: str) -> float:
+    """Score evidence completeness using extracted rating, reviews, and text."""
+    quality = 0
+    if product.get("rating") is not None:
+        quality += 40
+    if product.get("review_count"):
+        quality += 30
+    if len(snippet) > 80:
+        quality += 30
+    return float(quality)
+
+
+def _classify_category(text: str) -> str:
+    """Assign a coarse product category from title/description keywords."""
+    normalized = text.casefold()
+    category_terms = {
+        "Electronics": ("phone", "laptop", "headphone", "tablet", "camera", "electronics", "smartwatch", "speaker", "television", "tv"),
+        "Fashion": ("clothing", "shirt", "dress", "shoe", "sneaker", "jacket", "fashion", "handbag", "jeans"),
+        "Beauty": ("skincare", "cosmetic", "makeup", "shampoo", "perfume", "beauty", "moisturizer", "serum"),
+        "Books": ("book", "novel", "paperback", "hardcover", "isbn", "textbook"),
+        "Home": ("furniture", "kitchen", "bedding", "appliance", "home", "mattress", "lamp", "vacuum"),
+    }
+    for category, terms in category_terms.items():
+        if any(term in normalized for term in terms):
+            return category
+    return "Other"
 
 
 def _merge_product_and_verdict(

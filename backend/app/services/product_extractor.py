@@ -95,6 +95,8 @@ async def extract_product_data(url: str) -> dict[str, Any]:
             "title": str,
             "brand": str | None,
             "price": float | None,
+            "price_raw": str | None,
+            "price_currency": str | None,
             "rating": float | None,
             "image_url": str | None,
             "description": str | None,
@@ -105,6 +107,10 @@ async def extract_product_data(url: str) -> dict[str, Any]:
     Returns on failure (never raises)::
 
         {"url": url, "status": "error", "error": str}
+
+    ``price`` is parsed from the source amount without scaling. Currency is
+    populated only when the page provides an ISO code or unambiguous symbol;
+    ``price_raw`` retains the source amount text.
     """
     try:
         target = _normalize_url(url)
@@ -118,7 +124,10 @@ async def extract_product_data(url: str) -> dict[str, Any]:
             "title": parsed["title"],
             "brand": parsed["brand"],
             "price": parsed["price"],
+            "price_raw": parsed["price_raw"],
+            "price_currency": parsed["price_currency"],
             "rating": parsed["rating"],
+            "review_count": parsed["review_count"],
             "image_url": parsed["image_url"],
             "description": parsed["description"],
             "cleaned_content": parsed["cleaned_content"],
@@ -230,11 +239,15 @@ def _parse_product_page(html: str, base_url: str) -> dict[str, Any]:
     if not cleaned_content:
         cleaned_content = _fallback_text(html)
 
+    price = _extract_price_details(soup, product, cleaned_content)
     return {
         "title": _extract_title(soup),
         "brand": _extract_brand(soup, product),
-        "price": _extract_price(soup, product, cleaned_content),
+        "price": price["amount"],
+        "price_raw": price["raw"],
+        "price_currency": price["currency"],
         "rating": _extract_rating(soup, product),
+        "review_count": _extract_review_count(soup, product),
         "image_url": _extract_image(soup, product, base_url),
         "description": _extract_description(soup, product, cleaned_content),
         "cleaned_content": cleaned_content,
@@ -349,33 +362,55 @@ def _schema_image(product: dict) -> str | None:
 
 
 def _schema_price(product: dict) -> float | None:
+    return _schema_price_details(product)["amount"]
+
+
+def _schema_price_details(product: dict) -> dict[str, Any]:
     offers = product.get("offers")
     if isinstance(offers, dict):
         offers = [offers]
     if not isinstance(offers, list):
-        return None
+        return {"amount": None, "raw": None, "currency": None}
 
     for offer in offers:
         if not isinstance(offer, dict):
             continue
-        candidates: list[Any] = [offer.get("price"), offer.get("lowPrice")]
+        offer_currency = _normalize_currency(offer.get("priceCurrency"))
+        candidates: list[tuple[Any, str | None]] = [
+            (offer.get("price"), offer_currency),
+            (offer.get("lowPrice"), offer_currency),
+        ]
 
         spec = offer.get("priceSpecification")
         for item in spec if isinstance(spec, list) else [spec]:
             if isinstance(item, dict):
-                candidates.append(item.get("price"))
+                candidates.append(
+                    (
+                        item.get("price"),
+                        _normalize_currency(item.get("priceCurrency"))
+                        or offer_currency,
+                    )
+                )
 
         nested = offer.get("offers")  # AggregateOffer
         if nested:
-            price = _schema_price({"offers": nested})
-            if price is not None:
-                return price
+            details = _schema_price_details({"offers": nested})
+            if details["amount"] is not None:
+                details["currency"] = (
+                    details["currency"] or offer_currency
+                )
+                return details
 
-        for candidate in candidates:
-            price = _to_price(candidate)
-            if price is not None:
-                return price
-    return None
+        for candidate, currency in candidates:
+            amount = _to_price(candidate)
+            if amount is not None:
+                raw = str(candidate).strip() if candidate is not None else None
+                return {
+                    "amount": amount,
+                    "raw": raw,
+                    "currency": currency or _currency_from_text(raw or ""),
+                }
+    return {"amount": None, "raw": None, "currency": None}
 
 
 def _schema_rating(product: dict) -> float | None:
@@ -384,6 +419,45 @@ def _schema_rating(product: dict) -> float | None:
     if isinstance(agg, dict):
         rating_val = agg.get("ratingValue")
         return _to_rating(rating_val)
+    return None
+
+
+def _schema_review_count(product: dict | None) -> int | None:
+    """Extract the published review count from schema.org aggregateRating."""
+    aggregate = product.get("aggregateRating") if product else None
+    if not isinstance(aggregate, dict):
+        return None
+    raw = aggregate.get("reviewCount") or aggregate.get("ratingCount")
+    return _to_count(raw)
+
+
+def _to_count(value: Any) -> int | None:
+    if value is None:
+        return None
+    match = re.search(r"\d[\d,]*", str(value))
+    if not match:
+        return None
+    count = int(match.group(0).replace(",", ""))
+    return count if count > 0 else None
+
+
+def _extract_review_count(
+    soup: BeautifulSoup,
+    product: dict | None,
+) -> int | None:
+    count = _schema_review_count(product)
+    if count is not None:
+        return count
+    for selector in (
+        '[itemprop="reviewCount"]',
+        '[itemprop="ratingCount"]',
+        '[class*="review-count" i]',
+        '[class*="rating-count" i]',
+    ):
+        for node in soup.select(selector)[:10]:
+            count = _to_count(node.get("content") or node.get_text(" "))
+            if count is not None:
+                return count
     return None
 
 
@@ -495,6 +569,29 @@ def _price_from_text(text: str) -> float | None:
     return _parse_price_string(match.group(1)) if match else None
 
 
+def _currency_from_text(raw: str) -> str | None:
+    """Infer currency only from an unambiguous symbol or explicit ISO code."""
+    if re.search(r"\b(?:INR)\b|₹", raw, re.IGNORECASE):
+        return "INR"
+    if re.search(r"\b(?:USD)\b|US\$", raw, re.IGNORECASE):
+        return "USD"
+    if re.search(r"\b(?:EUR)\b|€", raw, re.IGNORECASE):
+        return "EUR"
+    if re.search(r"\b(?:GBP)\b|£", raw, re.IGNORECASE):
+        return "GBP"
+    return None
+
+
+def _normalize_currency(value: Any) -> str | None:
+    """Keep a source-provided ISO currency code without guessing from region."""
+    if not isinstance(value, str):
+        return None
+    currency = value.strip().upper()
+    if re.fullmatch(r"[A-Z]{3}", currency):
+        return currency
+    return _currency_from_text(currency)
+
+
 def _is_stale_price_element(element: Any) -> bool:
     if element.name in ("del", "s", "strike") or element.find_parent(
         ["del", "s", "strike"]
@@ -511,18 +608,34 @@ def _extract_price(
     Priority: schema.org offers -> price meta tags -> itemprop="price"
     -> price-like elements -> first currency amount in page text.
     """
+    return _extract_price_details(soup, product, cleaned_content)["amount"]
+
+
+def _extract_price_details(
+    soup: BeautifulSoup, product: dict | None, cleaned_content: str
+) -> dict[str, Any]:
+    """Return the source amount, original text, and only source-supported currency."""
     if product:
-        price = _schema_price(product)
-        if price is not None:
-            return price
+        details = _schema_price_details(product)
+        if details["amount"] is not None:
+            return details
 
     meta_price = _meta_content(
         soup, "product:price:amount", "og:price:amount", "product:sale_price:amount"
     )
-    if meta_price:
-        price = _parse_price_string(meta_price)
-        if price is not None:
-            return price
+    if meta_price is not None:
+        amount = _parse_price_string(meta_price)
+        if amount is not None:
+            return {
+                "amount": amount,
+                "raw": meta_price,
+                "currency": _normalize_currency(
+                    _meta_content(
+                        soup, "product:price:currency", "og:price:currency"
+                    )
+                )
+                or _currency_from_text(meta_price),
+            }
 
     for node in soup.select('[itemprop="price"]'):
         raw_value = node.get("content") or node.get("value") or node.get_text(" ")
@@ -530,18 +643,45 @@ def _extract_price(
             raw = " ".join(str(part) for part in raw_value)
         else:
             raw = str(raw_value)
-        price = _parse_price_string(raw)
-        if price is not None:
-            return price
+        amount = _parse_price_string(raw)
+        if amount is not None:
+            currency_node = soup.select_one('[itemprop="priceCurrency"]')
+            currency_raw = (
+                currency_node.get("content")
+                or currency_node.get_text(" ")
+                if currency_node
+                else None
+            )
+            return {
+                "amount": amount,
+                "raw": raw.strip(),
+                "currency": _normalize_currency(currency_raw)
+                or _currency_from_text(raw),
+            }
 
     for node in soup.select('[class*="price" i], [id*="price" i]')[:40]:
         if _is_stale_price_element(node):
             continue
-        price = _price_from_text(node.get_text(" "))
-        if price is not None:
-            return price
+        raw = node.get_text(" ").strip()
+        text_details = _price_text_details(raw)
+        if text_details["amount"] is not None:
+            return text_details
 
-    return _price_from_text(cleaned_content[:20000])
+    return _price_text_details(cleaned_content[:20000])
+
+
+def _price_text_details(text: str) -> dict[str, Any]:
+    match = _PRICE_PREFIX_RE.search(text or "") or _PRICE_SUFFIX_RE.search(
+        text or ""
+    )
+    if not match:
+        return {"amount": None, "raw": None, "currency": None}
+    raw = match.group(0).strip()
+    return {
+        "amount": _parse_price_string(match.group(1)),
+        "raw": raw,
+        "currency": _currency_from_text(raw),
+    }
 
 
 # --------------------------------------------------------------------------- #

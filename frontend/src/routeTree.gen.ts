@@ -14,6 +14,7 @@ import { Route as AnalyzingRouteImport } from './routes/analyzing'
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as ComparisonRouteImport } from './routes/comparison'
 import { Route as HistoryRouteImport } from './routes/history'
+import { Route as LeaderboardRouteImport } from './routes/leaderboard'
 import { Route as ResultRouteImport } from './routes/result'
 import { Route as SettingsRouteImport } from './routes/settings'
 import { Route as WorkspaceRouteImport } from './routes/workspace'
@@ -43,6 +44,11 @@ const HistoryRoute = HistoryRouteImport.update({
   path: '/history',
   getParentRoute: () => rootRouteImport,
 } as any)
+const LeaderboardRoute = LeaderboardRouteImport.update({
+  id: '/leaderboard',
+  path: '/leaderboard',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const ResultRoute = ResultRouteImport.update({
   id: '/result',
   path: '/result',
@@ -65,6 +71,7 @@ export interface FileRoutesByFullPath {
   '/auth': typeof AuthRoute
   '/comparison': typeof ComparisonRoute
   '/history': typeof HistoryRoute
+  '/leaderboard': typeof LeaderboardRoute
   '/result': typeof ResultRoute
   '/settings': typeof SettingsRoute
   '/workspace': typeof WorkspaceRoute
@@ -75,6 +82,7 @@ export interface FileRoutesByTo {
   '/auth': typeof AuthRoute
   '/comparison': typeof ComparisonRoute
   '/history': typeof HistoryRoute
+  '/leaderboard': typeof LeaderboardRoute
   '/result': typeof ResultRoute
   '/settings': typeof SettingsRoute
   '/workspace': typeof WorkspaceRoute
@@ -86,6 +94,7 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/comparison': typeof ComparisonRoute
   '/history': typeof HistoryRoute
+  '/leaderboard': typeof LeaderboardRoute
   '/result': typeof ResultRoute
   '/settings': typeof SettingsRoute
   '/workspace': typeof WorkspaceRoute
@@ -98,6 +107,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/comparison'
     | '/history'
+    | '/leaderboard'
     | '/result'
     | '/settings'
     | '/workspace'
@@ -108,6 +118,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/comparison'
     | '/history'
+    | '/leaderboard'
     | '/result'
     | '/settings'
     | '/workspace'
@@ -118,6 +129,7 @@ export interface FileRouteTypes {
     | '/auth'
     | '/comparison'
     | '/history'
+    | '/leaderboard'
     | '/result'
     | '/settings'
     | '/workspace'
@@ -129,6 +141,7 @@ export interface RootRouteChildren {
   AuthRoute: typeof AuthRoute
   ComparisonRoute: typeof ComparisonRoute
   HistoryRoute: typeof HistoryRoute
+  LeaderboardRoute: typeof LeaderboardRoute
   ResultRoute: typeof ResultRoute
   SettingsRoute: typeof SettingsRoute
   WorkspaceRoute: typeof WorkspaceRoute
@@ -171,6 +184,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof HistoryRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/leaderboard': {
+      id: '/leaderboard'
+      path: '/leaderboard'
+      fullPath: '/leaderboard'
+      preLoaderRoute: typeof LeaderboardRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/result': {
       id: '/result'
       path: '/result'
@@ -201,6 +221,7 @@ const rootRouteChildren: RootRouteChildren = {
   AuthRoute: AuthRoute,
   ComparisonRoute: ComparisonRoute,
   HistoryRoute: HistoryRoute,
+  LeaderboardRoute: LeaderboardRoute,
   ResultRoute: ResultRoute,
   SettingsRoute: SettingsRoute,
   WorkspaceRoute: WorkspaceRoute,

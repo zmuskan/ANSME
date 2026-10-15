@@ -18,7 +18,8 @@ Public API:
 Known limitations (by design, to keep behaviour predictable and explainable):
     * Keyword matching is lexical. Negation ("not durable") is not detected.
     * The high-price threshold is a single fixed number and assumes the
-      currency used by the extractor (see ``HIGH_PRICE_THRESHOLD``).
+      numeric units of the extracted amount (see ``HIGH_PRICE_THRESHOLD``).
+      It does not perform currency conversion.
 """
 
 from __future__ import annotations
@@ -172,7 +173,8 @@ def analyze_product(
     Args:
         title: Product title, if known.
         description: Product description, if known.
-        price: Product price in the extractor's currency units, if known.
+        price: Parsed numeric product amount, with no implicit currency or
+            scale conversion.
         rating: Customer rating on a 0-5 scale, if known.
         requirements: Optional free-text user requirements, for example
             ``"gaming camera battery"``.

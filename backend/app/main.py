@@ -6,8 +6,10 @@ from app.api.analyze import router as analyze_router
 from app.db.database import Base, engine
 from app.models.analysis import Analysis
 from app.models.evidence import Evidence
+from app.models.price_history import PriceHistory
 from app.api.history import router as history_router
 from app.api.analytics import router as analytics_router
+from app.api.leaderboard import router as leaderboard_router
 
 app = FastAPI(
     title="ANSME Decision Engine",
@@ -21,13 +23,14 @@ app.add_middleware(
         "http://127.0.0.1:8080",
     ],
     allow_credentials=True,
-    allow_methods=["*"],
-    allow_headers=["*"],
+    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_headers=["Authorization", "Content-Type"],
 )
 app.include_router(health_router)
 app.include_router(analyze_router)
 app.include_router(history_router)
 app.include_router(analytics_router)
+app.include_router(leaderboard_router)
 
 @app.on_event("startup")
 def create_tables():

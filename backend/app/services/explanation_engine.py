@@ -83,7 +83,7 @@ def generate_explanation(
         metrics: Mapping of metric name to 0-10 score (for example
             ``price_score``, ``rating_score``, ``value_score``,
             ``confidence_score``). Unknown metrics are explained generically.
-        verdict: ``"BUY"``, ``"CONSIDER"``, ``"SKIP"`` or any other label.
+        verdict: ``"WORTH IT"``, ``"CONSIDER"``, ``"SKIP"`` or any other label.
 
     Returns:
         A dictionary with:
@@ -190,8 +190,8 @@ def _build_verdict_reason(
     best = _top_names(metrics, highest=True)
     worst = _top_names(metrics, highest=False)
 
-    if verdict == "BUY":
-        reason = "Recommended to buy: the overall score is high"
+    if verdict == "WORTH IT":
+        reason = "Worth it: the overall score is high"
         if best:
             reason += f", driven mainly by {best}"
         reason += "."

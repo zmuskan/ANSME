@@ -16,11 +16,13 @@ class EvidenceRepository:
         analysis_id: int,
         source_type: str,
         evidence_text: str,
+        quality_score: float = 0,
     ) -> Evidence:
         evidence = Evidence(
             analysis_id=analysis_id,
             source_type=source_type,
             evidence_text=evidence_text,
+            quality_score=quality_score,
         )
 
         db.add(evidence)

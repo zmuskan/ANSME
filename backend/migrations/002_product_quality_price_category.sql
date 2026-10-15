@@ -1,0 +1,16 @@
+ALTER TABLE analyses
+    ADD COLUMN IF NOT EXISTS review_count INTEGER,
+    ADD COLUMN IF NOT EXISTS category VARCHAR(50) NOT NULL DEFAULT 'Other';
+
+ALTER TABLE evidence
+    ADD COLUMN IF NOT EXISTS quality_score DOUBLE PRECISION NOT NULL DEFAULT 0;
+
+CREATE TABLE IF NOT EXISTS price_history (
+    id SERIAL PRIMARY KEY,
+    analysis_id INTEGER NOT NULL REFERENCES analyses(id) ON DELETE CASCADE,
+    price DOUBLE PRECISION NOT NULL,
+    captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS ix_price_history_analysis_id
+    ON price_history (analysis_id);
