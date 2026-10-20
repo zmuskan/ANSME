@@ -1,4 +1,5 @@
 import { getAccessToken } from "@/lib/auth";
+import { fetchAllHistoryPages } from "@/lib/history-actions";
 
 const API_BASE =
   import.meta.env["VITE_API_URL"] ??
@@ -69,6 +70,8 @@ export interface SuccessfulProduct {
     verdict: string;
   }>;
   analysis: ProductAnalysis;
+  history_saved?: boolean;
+  history_save_error?: string;
 }
 
 export interface FailedProduct {
@@ -156,7 +159,8 @@ export interface HistoryAnalysis extends HistoryRecord {
 export async function analyzeProduct(
   url: string,
   budget?: number,
-  requirements?: string
+  requirements?: string,
+  saveHistory = true,
 ): Promise<AnalyzeProductResponse> {
   const headers = await authenticatedHeaders();
   headers.set("Content-Type", "application/json");
@@ -167,6 +171,7 @@ export async function analyzeProduct(
       urls: [url],
       budget,
       requirements,
+      save_history: saveHistory,
     }),
   });
 
@@ -194,6 +199,21 @@ export async function getHistory(limit = 50): Promise<HistoryRecord[]> {
   return response.json() as Promise<HistoryRecord[]>;
 }
 
+export async function getAllHistory(): Promise<HistoryRecord[]> {
+  return fetchAllHistoryPages(async (offset, limit) => {
+    const headers = await authenticatedHeaders();
+    const response = await fetch(
+      `${API_BASE}/history?limit=${limit}&offset=${offset}`,
+      { headers },
+    );
+    if (!response.ok) {
+      throw new Error(`Failed to load analysis history (HTTP ${response.status}).`);
+    }
+
+    return (await response.json()) as HistoryRecord[];
+  });
+}
+
 export async function getHistoryItem(id: number): Promise<HistoryAnalysis> {
   const headers = await authenticatedHeaders();
   const response = await fetch(`${API_BASE}/history/${id}`, { headers });
@@ -207,7 +227,8 @@ export async function getHistoryItem(id: number): Promise<HistoryAnalysis> {
 
 export async function getAnalytics(days?: number): Promise<AnalyticsSummary> {
   const params = days ? `?days=${days}` : "";
-  const response = await fetch(`${API_BASE}/analytics${params}`);
+  const headers = await authenticatedHeaders();
+  const response = await fetch(`${API_BASE}/analytics${params}`, { headers });
 
   if (!response.ok) {
     throw new Error("Failed to load analytics");
@@ -217,13 +238,11 @@ export async function getAnalytics(days?: number): Promise<AnalyticsSummary> {
 }
 
 export interface LeaderboardItem {
-  id: number;
   title: string;
-  url: string;
+  url: string | null;
   overall_score: number;
   verdict: string;
   category: string;
-  created_at: string;
 }
 
 export async function getLeaderboard(limit = 10): Promise<{
@@ -232,9 +251,36 @@ export async function getLeaderboard(limit = 10): Promise<{
 }> {
   const response = await fetch(`${API_BASE}/leaderboard?limit=${limit}`);
   if (!response.ok) {
-    throw new Error("Failed to load leaderboard");
+    throw new Error(`Failed to load leaderboard (HTTP ${response.status}).`);
   }
   return response.json();
+}
+
+export async function getLeaderboardParticipation(): Promise<boolean> {
+  const headers = await authenticatedHeaders();
+  const response = await fetch(`${API_BASE}/leaderboard/participation`, {
+    headers,
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to load leaderboard preference (HTTP ${response.status}).`);
+  }
+  const data = (await response.json()) as { enabled: boolean };
+  return data.enabled;
+}
+
+export async function setLeaderboardParticipation(
+  enabled: boolean,
+): Promise<void> {
+  const headers = await authenticatedHeaders();
+  headers.set("Content-Type", "application/json");
+  const response = await fetch(`${API_BASE}/leaderboard/participation`, {
+    method: "PUT",
+    headers,
+    body: JSON.stringify({ enabled }),
+  });
+  if (!response.ok) {
+    throw new Error(`Failed to update leaderboard preference (HTTP ${response.status}).`);
+  }
 }
 
 export async function deleteHistoryItem(

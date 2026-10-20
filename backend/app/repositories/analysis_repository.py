@@ -13,10 +13,12 @@ from typing import Any, Sequence
 from urllib.parse import urlparse
 from uuid import UUID
 
-from sqlalchemy import func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
 
 from app.models.analysis import Analysis
+from app.models.evidence import Evidence
+from app.models.price_history import PriceHistory
 
 
 class AnalysisRepository:
@@ -80,6 +82,7 @@ class AnalysisRepository:
         db: Session,
         user_id: UUID,
         limit: int = 100,
+        offset: int = 0,
     ) -> Sequence[Analysis]:
         """
         List analyses ordered from newest to oldest.
@@ -96,7 +99,8 @@ class AnalysisRepository:
         statement = (
             select(Analysis)
             .where(Analysis.user_id == user_id)
-            .order_by(Analysis.created_at.desc())
+            .order_by(Analysis.created_at.desc(), Analysis.id.desc())
+            .offset(offset)
             .limit(limit)
         )
         return db.execute(statement).scalars().all()
@@ -133,6 +137,12 @@ class AnalysisRepository:
             return False
 
         try:
+            db.execute(
+                delete(Evidence).where(Evidence.analysis_id == analysis_id)
+            )
+            db.execute(
+                delete(PriceHistory).where(PriceHistory.analysis_id == analysis_id)
+            )
             db.delete(analysis)
             db.commit()
         except Exception:
@@ -141,9 +151,13 @@ class AnalysisRepository:
         return True
 
     @staticmethod
-    def get_analytics(db: Session, days: int | None = None) -> dict[str, Any]:
+    def get_analytics(
+        db: Session,
+        user_id: UUID,
+        days: int | None = None,
+    ) -> dict[str, Any]:
         """Aggregate analysis, category, source, and score-trend data."""
-        records = db.query(Analysis)
+        records = db.query(Analysis).filter(Analysis.user_id == user_id)
         if days is not None:
             records = records.filter(
                 Analysis.created_at >= datetime.now(timezone.utc) - timedelta(days=days)
@@ -243,16 +257,22 @@ class AnalysisRepository:
 
     @staticmethod
     def get_leaderboard(db: Session, limit: int = 10) -> dict[str, Sequence[Analysis]]:
-        """Return top and bottom scored persisted analyses."""
+        """Return top and bottom analyses from users who opted into sharing."""
+        from app.models.user_preference import UserPreference
+
+        shared_analyses = db.query(Analysis).join(
+            UserPreference,
+            Analysis.user_id == UserPreference.user_id,
+        ).filter(UserPreference.share_to_leaderboard.is_(True))
         return {
             "highest": (
-                db.query(Analysis)
+                shared_analyses
                 .order_by(Analysis.overall_score.desc(), Analysis.created_at.desc())
                 .limit(limit)
                 .all()
             ),
             "lowest": (
-                db.query(Analysis)
+                shared_analyses
                 .order_by(Analysis.overall_score.asc(), Analysis.created_at.desc())
                 .limit(limit)
                 .all()

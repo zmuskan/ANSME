@@ -1,11 +1,13 @@
 from __future__ import annotations
 
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel, Field
 from sqlalchemy.orm import Session
 
+from app.auth import get_current_user_id
 from app.db.database import get_db
 from app.repositories.analysis_repository import AnalysisRepository
 from app.services.comparison_engine import compare_products
@@ -75,9 +77,10 @@ async def review_analysis(
 async def analytics_summary(
     days: int | None = Query(default=None, ge=1, le=3650),
     db: Session = Depends(get_db),
+    user_id: UUID = Depends(get_current_user_id),
 ) -> dict[str, Any]:
     """Return aggregated analytics, optionally limited to recent days."""
-    return AnalysisRepository.get_analytics(db, days=days)
+    return AnalysisRepository.get_analytics(db, user_id=user_id, days=days)
 
 
 @router.post("/compare")

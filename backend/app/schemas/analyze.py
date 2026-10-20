@@ -15,3 +15,4 @@ class AnalyzeRequest(BaseModel):
     urls: List[str]
     budget: Optional[float] = None
     requirements: Optional[str] = None
+    save_history: bool = True

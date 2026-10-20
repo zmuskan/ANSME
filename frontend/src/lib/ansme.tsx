@@ -4,7 +4,8 @@ import { motion } from "motion/react";
 import { CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Bell, Check, ChevronRight, Clock3, Download, Headphones, History, Home, Menu, Plus, Search, Settings, ShieldCheck, Sparkles, Trash2, Trophy, X } from "lucide-react";
 import { createContext, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useContext, useEffect, useMemo, useState } from "react";
-import { analyzeProduct, deleteHistoryItem, getAnalytics, getHistory, getHistoryItem, getLeaderboard, type AnalyticsSummary, type HistoryRecord, type LeaderboardItem, type SuccessfulProduct } from "@/lib/api";
+import { analyzeProduct, deleteHistoryItem, getAllHistory, getAnalytics, getHistoryItem, getLeaderboard, getLeaderboardParticipation, setLeaderboardParticipation, type AnalyticsSummary, type HistoryRecord, type LeaderboardItem, type SuccessfulProduct } from "@/lib/api";
+import { deleteHistoryRecords } from "@/lib/history-actions";
 import { signInAsGuest, signInWithGoogle, useAuth } from "@/lib/auth";
 import authAsset from "@/assets/01_auth_background.mp4";
 import authWebmAsset from "@/assets/01_auth_background.webm";
@@ -19,9 +20,9 @@ export interface AnalysisRequest { urls: string[]; budget: string; requirements:
 export type SingleResult = SuccessfulProduct;
 export interface ComparisonResult { products: SuccessfulProduct[] }
 export interface HistoryItem { id: string; title: string; url: string; date: string; verdict: string; price: string; score: number }
-export interface UserSettings { saveHistory: boolean; personalizedAdvice: boolean; notifications: boolean; theme: "system" | "dark" | "light" }
+export interface UserSettings { saveHistory: boolean; personalizedAdvice: boolean; notifications: boolean; shareToLeaderboard: boolean; theme: "system" | "dark" | "light" }
 
-type AppState = { request: AnalysisRequest; setRequest: (r: AnalysisRequest) => void; result: SingleResult | null; setResult: (r: SingleResult) => void; comparison: ComparisonResult | null; setComparison: (c: ComparisonResult) => void; history: HistoryItem[]; setHistory: Dispatch<SetStateAction<HistoryItem[]>>; settings: UserSettings; setSettings: (s: UserSettings) => void };
+type AppState = { request: AnalysisRequest; setRequest: (r: AnalysisRequest) => void; result: SingleResult | null; setResult: (r: SingleResult) => void; comparison: ComparisonResult | null; setComparison: (c: ComparisonResult) => void; history: HistoryItem[]; setHistory: Dispatch<SetStateAction<HistoryItem[]>>; settings: UserSettings; setSettings: Dispatch<SetStateAction<UserSettings>> };
 const AppContext = createContext<AppState | undefined>(undefined);
 export function AppProvider({ children }: { children: ReactNode }) {
   const [request, setRequest] = useState<AnalysisRequest>({ urls: [], budget: "", requirements: "" });
@@ -33,6 +34,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       saveHistory: true,
       personalizedAdvice: true,
       notifications: false,
+      shareToLeaderboard: false,
       theme: readSavedTheme(),
     };
 
@@ -148,7 +150,7 @@ export function AuthScreen() {
   return <main className="ansme-screen overflow-hidden"><div className="portrait-stage"><video className="screen-art" autoPlay muted loop playsInline><source src={authWebmAsset} type="video/webm" /><source src={authAsset} type="video/mp4" /></video><div className="auth-overlay"><button type="button" className="action-button google-button" onClick={() => void handleGoogleSignIn()} disabled={signInMethod !== null}><span className="google-g">G</span> {signInMethod === "google" ? "Signing in…" : "Continue with Google"}</button><button type="button" className="action-button guest-button" onClick={() => void handleGuestSignIn()} disabled={signInMethod !== null}>{signInMethod === "guest" ? "Signing in…" : "Continue as Guest"}</button>{(error || authError) && <p className="analysis-error" role="alert">{error ?? authError?.message}</p>}<div className="trust-line"><span><ShieldCheck className="size-4" />Research first. Regret less.</span><small>No spam. No bore. Just decisions.</small></div></div></div></main>;
 }
 export function WorkspaceScreen() {
-  const navigate = useNavigate(); const { request, setRequest, setResult, setComparison, result } = useAnsme(); const [urls, setUrls] = useState<string[]>(request.urls.length ? request.urls : [""]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null); const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null); const [analyticsDays, setAnalyticsDays] = useState<number | undefined>(30);
+  const navigate = useNavigate(); const { request, setRequest, setResult, setComparison, result, settings } = useAnsme(); const [urls, setUrls] = useState<string[]>(request.urls.length ? request.urls : [""]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null); const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null); const [analyticsDays, setAnalyticsDays] = useState<number | undefined>(30);
 
   useEffect(() => {
     const loadAnalytics = async () => {
@@ -196,7 +198,7 @@ export function WorkspaceScreen() {
     try {
       const budget = parseBudget(request.budget);
       if (validUrls.length === 1) {
-        const result = await analyzeProduct(firstUrl, budget, request.requirements);
+        const result = await analyzeProduct(firstUrl, budget, request.requirements, settings.saveHistory);
         console.log(result);
         const product = result.products[0];
         if (!product || product.status !== "success") {
@@ -208,7 +210,7 @@ export function WorkspaceScreen() {
       }
 
       const products = await Promise.all(validUrls.map(async (productUrl) => {
-        const result = await analyzeProduct(productUrl, budget, request.requirements);
+        const result = await analyzeProduct(productUrl, budget, request.requirements, settings.saveHistory);
         console.log(result);
         const product = result.products[0];
         if (!product || product.status !== "success") {
@@ -392,6 +394,7 @@ export function ResultScreen() {
 
   return <Screen name="result" scroll>
     <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel result-panel">
+      {result.history_save_error && <p className="analysis-error" role="status">{result.history_save_error}</p>}
       <div className="result-hero">
         <div className="result-hero-copy">
           <p className="eyebrow">ANSME verdict</p>
@@ -614,6 +617,8 @@ export function ComparisonScreen() {
   return <Screen name="comparison" scroll>
     <section className="glass-panel comparison-panel">
       <p className="eyebrow">Head-to-head decision</p>
+      {products.find((product) => product.history_save_error)?.history_save_error
+        && <p className="analysis-error" role="status">One or more analyses completed but could not be saved to your history.</p>}
       <div className={`comparison-verdict${undecided ? " undecided" : ""}`}>
         <div><span>{tied ? "The scores are tied" : budgetUnverified ? "The budget currency could not be matched to every price" : insufficientData ? "The scoring data is incomplete" : "Deterministic ANSME recommendation"}</span><h1>{banner}</h1></div>
         {selected && <p>{selected.title} · {selected.verdict} · {selected.overall_score.toFixed(1)}/10</p>}
@@ -707,13 +712,14 @@ export function HistoryScreen() {
   const { history, setHistory, setResult } = useAnsme();
   const [search, setSearch] = useState("");
   const [error, setError] = useState<string | null>(null);
+  const [historyLoading, setHistoryLoading] = useState(true);
 
   useEffect(() => {
     let cancelled = false;
 
     async function loadHistory() {
       try {
-        const data = await getHistory();
+        const data = await getAllHistory();
 
         if (!cancelled) {
           setHistory(data.map(mapHistoryRecord));
@@ -724,6 +730,8 @@ export function HistoryScreen() {
         if (!cancelled) {
           setError("Unable to load analysis history.");
         }
+      } finally {
+        if (!cancelled) setHistoryLoading(false);
       }
     }
 
@@ -815,7 +823,7 @@ export function HistoryScreen() {
     [item.title, item.url, item.price, item.verdict, item.date]
       .some((value) => value.toLowerCase().includes(normalizedSearch))
   );
-  return <Screen name="history" scroll><section className="glass-panel history-panel"><p className="eyebrow">Decision archive</p><h1>Your past calls</h1><label className="search-box"><Search /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search analyses" /></label><button type="button" className="action-button" onClick={exportHistoryCsv}><Download />Export CSV</button>{error && <p className="analysis-error" role="alert">{error}</p>}<div className="history-list">{filtered.map((item) => <article key={item.id}><div><small><Clock3 />{item.date}</small><h2>{item.title}</h2><p>{item.price} · Score {item.score.toFixed(1)}</p></div><div><span className={`verdict-badge ${item.verdict.toLowerCase().replace(" ", "-")}`}>{item.verdict}</span><button type="button" onClick={() => void reopenAnalysis(item.id)}>Reopen <ChevronRight /></button><button type="button" className="icon-button" aria-label={`Delete ${item.title}`} onClick={() => void handleDelete(item.id)}><Trash2 /></button></div></article>)}</div><Link to="/workspace" className="action-button primary-action"><Plus />New analysis</Link></section></Screen>;
+  return <Screen name="history" scroll><section className="glass-panel history-panel"><p className="eyebrow">Decision archive</p><h1>Your past calls</h1><label className="search-box"><Search /><input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search analyses" /></label><button type="button" className="action-button" onClick={exportHistoryCsv} disabled={historyLoading}><Download />Export CSV</button>{error && <p className="analysis-error" role="alert">{error}</p>}<div className="history-list">{historyLoading ? <p role="status">Loading analysis history…</p> : error ? null : filtered.length ? filtered.map((item) => <article key={item.id}><div><small><Clock3 />{item.date}</small><h2>{item.title}</h2><p>{item.price} · Score {item.score.toFixed(1)}</p></div><div><span className={`verdict-badge ${item.verdict.toLowerCase().replace(" ", "-")}`}>{item.verdict}</span><button type="button" onClick={() => void reopenAnalysis(item.id)}>Reopen <ChevronRight /></button><button type="button" className="icon-button" aria-label={`Delete ${item.title}`} onClick={() => void handleDelete(item.id)}><Trash2 /></button></div></article>) : <p>{search ? "No analyses match your search." : "No saved analyses yet."}</p>}</div><Link to="/workspace" className="action-button primary-action"><Plus />New analysis</Link></section></Screen>;
 }
 
 export function LeaderboardScreen() {
@@ -841,7 +849,7 @@ export function LeaderboardScreen() {
   }, []);
 
   function renderEntries(title: string, entries: LeaderboardItem[]) {
-    return <section className="leaderboard-list"><h2>{title}</h2>{entries.length ? entries.map((item, index) => <article key={item.id}><span>#{index + 1}</span><div><a href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a><small>{item.category} · {item.verdict}</small></div><strong>{item.overall_score.toFixed(1)}/10</strong></article>) : <p>No analyzed products yet.</p>}</section>;
+    return <section className="leaderboard-list"><h2>{title}</h2>{entries.length ? entries.map((item, index) => <article key={`${item.title}-${index}`}><span>#{index + 1}</span><div>{item.url ? <a href={item.url} target="_blank" rel="noopener noreferrer">{item.title}</a> : <span>{item.title}</span>}<small>{item.category} · {item.verdict}</small></div><strong>{item.overall_score.toFixed(1)}/10</strong></article>) : <p>No analyzed products yet.</p>}</section>;
   }
 
   return <Screen name="workspace" scroll><section className="glass-panel leaderboard-panel"><p className="eyebrow">Community data</p><h1>Product leaderboard</h1>{error && <p className="analysis-error" role="alert">{error}</p>}{leaderboard && <>{renderEntries("Top 10 highest scoring", leaderboard.highest)}{renderEntries("Top 10 lowest scoring", leaderboard.lowest)}</>}</section></Screen>;
@@ -866,6 +874,53 @@ export function SettingsScreen() {
   const [dataActionStatus, setDataActionStatus] = useState<string | null>(null);
   const [dataActionProgress, setDataActionProgress] = useState<string | null>(null);
   const [dataActionInProgress, setDataActionInProgress] = useState(false);
+  const [leaderboardPreferenceLoading, setLeaderboardPreferenceLoading] = useState(true);
+  const [leaderboardPreferenceLoaded, setLeaderboardPreferenceLoaded] = useState(false);
+  const [leaderboardPreferenceSaving, setLeaderboardPreferenceSaving] = useState(false);
+
+  useEffect(() => {
+    let cancelled = false;
+    getLeaderboardParticipation()
+      .then((enabled) => {
+        if (!cancelled) {
+          setSettings((current) => ({ ...current, shareToLeaderboard: enabled }));
+          setLeaderboardPreferenceLoaded(true);
+        }
+      })
+      .catch((error: unknown) => {
+        console.error("Unable to load leaderboard participation preference.", error);
+        if (!cancelled) {
+          setDataActionError("Unable to load your leaderboard sharing preference.");
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setLeaderboardPreferenceLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [setSettings]);
+
+  async function handleLeaderboardParticipationChange(enabled: boolean) {
+    setLeaderboardPreferenceSaving(true);
+    setDataActionError(null);
+    setDataActionStatus(null);
+    try {
+      await setLeaderboardParticipation(enabled);
+      setSettings({ ...settings, shareToLeaderboard: enabled });
+      setLeaderboardPreferenceLoaded(true);
+      setDataActionStatus(
+        enabled
+          ? "Your saved analyses are now included in the community leaderboard."
+          : "Your saved analyses have been removed from the community leaderboard.",
+      );
+    } catch (error) {
+      console.error("Unable to update leaderboard participation.", error);
+      setDataActionError("Unable to update your leaderboard sharing preference.");
+    } finally {
+      setLeaderboardPreferenceSaving(false);
+    }
+  }
 
   async function handleExportData() {
     setDataActionInProgress(true);
@@ -873,10 +928,14 @@ export function SettingsScreen() {
     setDataActionStatus(null);
 
     try {
-      const records = await getHistory(Number.MAX_SAFE_INTEGER);
-      const analyses = await Promise.all(
-        records.map((record) => getHistoryItem(record.id)),
-      );
+      const records = await getAllHistory();
+      const analyses: Awaited<ReturnType<typeof getHistoryItem>>[] = [];
+      for (let index = 0; index < records.length; index += 10) {
+        const page = records.slice(index, index + 10);
+        analyses.push(
+          ...(await Promise.all(page.map((record) => getHistoryItem(record.id)))),
+        );
+      }
       const blob = new Blob([JSON.stringify(analyses, null, 2)], {
         type: "application/json",
       });
@@ -901,7 +960,7 @@ export function SettingsScreen() {
     setDataActionStatus(null);
 
     try {
-      const records = await getHistory(Number.MAX_SAFE_INTEGER);
+      const records = await getAllHistory();
       if (records.length === 0) {
         setDataActionStatus("There are no saved analyses to delete.");
         return;
@@ -912,31 +971,28 @@ export function SettingsScreen() {
       );
       if (!confirmed) return;
 
-      const deletedIds = new Set<string>();
-      const failedIds: number[] = [];
-      for (const [index, record] of records.entries()) {
-        setDataActionProgress(
-          `Deleting analysis ${index + 1} of ${records.length}…`,
-        );
-        try {
-          await deleteHistoryItem(record.id);
-          deletedIds.add(String(record.id));
-        } catch (error) {
-          console.error(`Unable to delete analysis ${record.id}.`, error);
-          failedIds.push(record.id);
-        }
+      const { deletedIds, failures } = await deleteHistoryRecords(
+        records,
+        (id) => deleteHistoryItem(id),
+        (index, total) => {
+          setDataActionProgress(`Deleting analysis ${index} of ${total}…`);
+        },
+      );
+      for (const failure of failures) {
+        console.error(`Unable to delete analysis ${failure.id}.`, failure.error);
       }
 
+      const deletedIdSet = new Set(deletedIds.map(String));
       setHistory((current) =>
-        current.filter((record) => !deletedIds.has(record.id)),
+        current.filter((record) => !deletedIdSet.has(record.id)),
       );
 
-      if (failedIds.length > 0) {
+      if (failures.length > 0) {
         setDataActionError(
-          `Deleted ${deletedIds.size} analyses, but ${failedIds.length} could not be deleted. Please retry.`,
+          `Deleted ${deletedIds.length} analyses, but ${failures.length} could not be deleted. Please retry.`,
         );
       } else {
-        setDataActionStatus(`Deleted all ${deletedIds.size} saved analyses.`);
+        setDataActionStatus(`Deleted all ${deletedIds.length} saved analyses.`);
       }
     } catch (error) {
       console.error("Unable to delete analysis history.", error);
@@ -949,6 +1005,6 @@ export function SettingsScreen() {
     }
   }
 
-  return <Screen name="settings" scroll><section className="glass-panel settings-panel"><div className="tabs">{(["settings", "privacy", "terms", "disclaimer"] as const).map((name) => <button key={name} className={tab === name ? "active" : ""} onClick={() => setTab(name)}>{name}</button>)}</div>{tab === "settings" ? <><p className="eyebrow">Your rules</p><h1>Settings</h1><div className="setting-list"><Toggle label="Save analysis history" value={settings.saveHistory} onChange={(value) => setSettings({ ...settings, saveHistory: value })} /><Toggle label="Personalized advice" value={settings.personalizedAdvice} onChange={(value) => setSettings({ ...settings, personalizedAdvice: value })} /><Toggle label="Notifications" value={settings.notifications} onChange={(value) => setSettings({ ...settings, notifications: value })} icon={<Bell />} /><label className="theme-row"><span>Theme preference</span><select value={settings.theme} onChange={(e) => setSettings({ ...settings, theme: e.target.value as UserSettings["theme"] })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use device setting</option></select></label></div><div className="data-actions"><button type="button" onClick={() => void handleExportData()} disabled={dataActionInProgress}><Download />{dataActionInProgress ? "Working…" : "Export data"}</button><button type="button" className="danger-action" onClick={() => void handleDeleteData()} disabled={dataActionInProgress}><Trash2 />Delete data</button></div>{dataActionProgress && <p role="status">{dataActionProgress}</p>}{dataActionError && <p className="analysis-error" role="alert">{dataActionError}</p>}{dataActionStatus && <p role="status">{dataActionStatus}</p>}<p className="privacy-note"><ShieldCheck />Your data, your call.</p></> : <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="legal-copy"><p className="eyebrow">ANSME</p><h1>{legal[tab].title}</h1><p>{legal[tab].body}</p><p>We keep our language clear, collect only what the experience needs, and never sell personal information.</p></motion.div>}</section></Screen>;
+  return <Screen name="settings" scroll><section className="glass-panel settings-panel"><div className="tabs">{(["settings", "privacy", "terms", "disclaimer"] as const).map((name) => <button key={name} className={tab === name ? "active" : ""} onClick={() => setTab(name)}>{name}</button>)}</div>{tab === "settings" ? <><p className="eyebrow">Your rules</p><h1>Settings</h1><div className="setting-list"><Toggle label="Save analysis history" value={settings.saveHistory} onChange={(value) => setSettings({ ...settings, saveHistory: value })} /><Toggle label="Personalized advice" value={settings.personalizedAdvice} onChange={(value) => setSettings({ ...settings, personalizedAdvice: value })} /><Toggle label="Notifications" value={settings.notifications} onChange={(value) => setSettings({ ...settings, notifications: value })} icon={<Bell />} /><Toggle label="Share analyses on community leaderboard" value={settings.shareToLeaderboard} onChange={(value) => void handleLeaderboardParticipationChange(value)} disabled={leaderboardPreferenceLoading || leaderboardPreferenceSaving || !leaderboardPreferenceLoaded} /><label className="theme-row"><span>Theme preference</span><select value={settings.theme} onChange={(e) => setSettings({ ...settings, theme: e.target.value as UserSettings["theme"] })}><option value="dark">Dark</option><option value="light">Light</option><option value="system">Use device setting</option></select></label></div><p className="empty-state">Sharing is off by default. When enabled, product title, a sanitized product link (without credentials, query parameters, or fragments), score, verdict, and category for your saved analyses are public. Unsafe or unsupported links are omitted. No account identifiers are shared. Deleting analysis history does not delete your Supabase account.</p><div className="data-actions"><button type="button" onClick={() => void handleExportData()} disabled={dataActionInProgress}><Download />{dataActionInProgress ? "Working…" : "Export data"}</button><button type="button" className="danger-action" onClick={() => void handleDeleteData()} disabled={dataActionInProgress}><Trash2 />Delete analysis history</button></div>{dataActionProgress && <p role="status">{dataActionProgress}</p>}{dataActionError && <p className="analysis-error" role="alert">{dataActionError}</p>}{dataActionStatus && <p role="status">{dataActionStatus}</p>}<p className="privacy-note"><ShieldCheck />Your data, your call.</p></> : <motion.div key={tab} initial={{ opacity: 0, y: 8 }} animate={{ opacity: 1, y: 0 }} className="legal-copy"><p className="eyebrow">ANSME</p><h1>{legal[tab].title}</h1><p>{legal[tab].body}</p><p>We keep our language clear, collect only what the experience needs, and never sell personal information.</p></motion.div>}</section></Screen>;
 }
-function Toggle({ label, value, onChange, icon }: { label: string; value: boolean; onChange: (value: boolean) => void; icon?: ReactNode }) { return <label className="toggle-row"><span>{icon}{label}</span><button type="button" role="switch" aria-checked={value} aria-label={label} className={value ? "on" : ""} onClick={() => onChange(!value)}><span /></button></label>; }
+function Toggle({ label, value, onChange, icon, disabled = false }: { label: string; value: boolean; onChange: (value: boolean) => void; icon?: ReactNode; disabled?: boolean }) { return <label className="toggle-row"><span>{icon}{label}</span><button type="button" role="switch" aria-checked={value} aria-label={label} className={value ? "on" : ""} disabled={disabled} onClick={() => onChange(!value)}><span /></button></label>; }

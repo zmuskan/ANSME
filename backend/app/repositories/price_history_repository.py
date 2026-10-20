@@ -32,8 +32,7 @@ class PriceHistoryRepository:
     def for_analysis(db: Session, analysis: Analysis) -> dict[str, Any]:
         rows = (
             db.query(PriceHistory)
-            .join(Analysis, PriceHistory.analysis_id == Analysis.id)
-            .filter(Analysis.url == analysis.url)
+            .filter(PriceHistory.analysis_id == analysis.id)
             .order_by(PriceHistory.captured_at.asc())
             .all()
         )

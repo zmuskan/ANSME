@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from uuid import UUID
 
-from fastapi import APIRouter, Depends, HTTPException, status
+from fastapi import APIRouter, Depends, HTTPException, Query, status
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user_id
@@ -22,7 +22,8 @@ router = APIRouter(prefix="/history", tags=["History"])
 
 @router.get("")
 def list_history(
-    limit: int = 100,
+    limit: int = Query(default=100, ge=1, le=100),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     user_id: UUID = Depends(get_current_user_id),
 ):
@@ -34,6 +35,7 @@ def list_history(
         db=db,
         user_id=user_id,
         limit=limit,
+        offset=offset,
     )
 
     return [
@@ -115,7 +117,7 @@ def get_history_item(
             {
                 "title": analysis.title or analysis.url,
                 "url": analysis.url,
-                "source": "Strength" if item.source_type == "pro" else "Concern",
+                "source": "Strength" if str(item.source_type) == "pro" else "Concern",
                 "score": analysis.overall_score,
                 "snippet": item.evidence_text,
                 "quality_score": item.quality_score,

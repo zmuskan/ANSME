@@ -7,6 +7,7 @@ from app.db.database import Base, engine
 from app.models.analysis import Analysis
 from app.models.evidence import Evidence
 from app.models.price_history import PriceHistory
+from app.models.user_preference import UserPreference
 from app.api.history import router as history_router
 from app.api.analytics import router as analytics_router
 from app.api.leaderboard import router as leaderboard_router
