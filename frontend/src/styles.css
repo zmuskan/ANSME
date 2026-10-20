@@ -239,6 +239,11 @@
   .google-button { box-shadow: 0 0 18px oklch(0.8 0.18 190 / 42%); }
   .guest-button { box-shadow: 0 0 18px oklch(0.72 0.25 340 / 45%); }
   .google-g { font-weight: 1000; color: var(--neon-lime); }
+  @media (min-width: 701px) {
+    .portrait-stage { width: 100%; min-height: 100dvh; margin: 0; box-shadow: none; }
+    .portrait-stage > .screen-art { object-position: center center; }
+    .auth-overlay { width: min(calc(100% - 3rem), 26rem); }
+  }
   .trust-line {
   margin: .45rem 0 0;
   min-height: 70px;

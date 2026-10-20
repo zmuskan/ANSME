@@ -2,15 +2,8 @@
 Product extraction service.
 
 Fetches a product page and converts it into a standardized dictionary of raw
-product data. This is the first stage of the ANSME pipeline:
-
-    Raw Data -> Feature Engineering -> Scoring -> Verdict -> LLM Explainability
-
-This module only collects raw data. It performs no scoring, no verdicts and
-no LLM calls, and has no database or FastAPI dependencies.
-
-Dependencies:
-    pip install httpx beautifulsoup4 trafilatura lxml
+product data. This module collects raw data only; it performs no scoring,
+verdict generation, LLM calls, database operations, or FastAPI operations.
 """
 
 from __future__ import annotations
@@ -32,96 +25,98 @@ __all__ = ["extract_product_data"]
 
 logger = logging.getLogger(__name__)
 
-# --------------------------------------------------------------------------- #
-# Configuration
-# --------------------------------------------------------------------------- #
-
 REQUEST_TIMEOUT = httpx.Timeout(20.0, connect=8.0)
 MAX_REDIRECTS = 5
-MAX_RESPONSE_BYTES = 2 * 1024 * 1024  # 2 MB hard cap on downloaded HTML
-MIN_IMAGE_DIMENSION = 200  # px, used for the "first large image" fallback
+MAX_RESPONSE_BYTES = 2 * 1024 * 1024
+MIN_IMAGE_DIMENSION = 200
 DESCRIPTION_SNIPPET_CHARS = 300
 
-BROWSER_HEADERS = {
-    "User-Agent": (
-        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-        "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-    ),
-    "Accept": (
-        "text/html,application/xhtml+xml,application/xml;q=0.9,"
-        "image/avif,image/webp,*/*;q=0.8"
-    ),
-    "Accept-Language": "en-US,en;q=0.9",
-    "Upgrade-Insecure-Requests": "1",
-    "Sec-Fetch-Dest": "document",
-    "Sec-Fetch-Mode": "navigate",
-    "Sec-Fetch-Site": "none",
-    "Sec-Fetch-User": "?1",
+# Use a descriptive, non-spoofed user agent. Retailers may still block requests.
+REQUEST_HEADERS = {
+    "User-Agent": "ANSME product research tool (product data extraction)",
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-IN,en;q=0.9",
 }
 
-# Currency symbol before the number: "₹1,29,999", "$ 19.99", "Rs. 499", "INR 1200"
 _PRICE_PREFIX_RE = re.compile(
-    r"(?:₹|Rs\.?|INR|US\$|\$|USD|€|EUR|£|GBP)\s*(\d[\d.,]*)", re.IGNORECASE
+    r"(?:₹|Rs\.?|INR|US\$|USD|\$|€|EUR|£|GBP)\s*([\d][\d.,]*)",
+    re.IGNORECASE,
 )
-# Currency symbol after the number: "19,99 €"
-_PRICE_SUFFIX_RE = re.compile(r"(\d[\d.,]*)\s*(?:€|EUR)", re.IGNORECASE)
+_PRICE_SUFFIX_RE = re.compile(r"([\d][\d.,]*)\s*(?:€|EUR)", re.IGNORECASE)
 _NUMBER_RE = re.compile(r"\d[\d.,]*")
-
-# Price containers that usually hold struck-through / non-selling prices.
 _STALE_PRICE_RE = re.compile(
-    r"(old|was|original|mrp|strike|list|compare|regular|crossed|discount|saving|save)",
+    r"\b(?:old|was|original|mrp|strike|list|compare|regular|crossed|discount|saving|save)\b",
     re.IGNORECASE,
 )
 _SKIP_IMAGE_RE = re.compile(
-    r"(logo|icon|sprite|pixel|avatar|badge|placeholder|spinner|loading|blank)",
+    r"(?:logo|icon|sprite|pixel|avatar|badge|placeholder|spinner|loading|blank|banner|events|g/31)",
     re.IGNORECASE,
 )
 _PRODUCT_TYPES = {"product", "productgroup", "individualproduct"}
 
 
-# --------------------------------------------------------------------------- #
-# Public API
-# --------------------------------------------------------------------------- #
+class ProductExtractionError(Exception):
+    """Expected extraction failure with a safe, user-facing message."""
+
+
+def _error_result(url: str, message: str, *, error_code: str) -> dict[str, Any]:
+    return {
+        "url": url,
+        "status": "error",
+        "error": message,
+        "error_code": error_code,
+    }
 
 
 async def extract_product_data(url: str) -> dict[str, Any]:
     """
-    Fetch ``url`` and extract standardized product data.
+    Fetch a product page and return standardized raw product data.
 
-    Returns on success::
-
-        {
-            "url": str,
-            "title": str,
-            "brand": str | None,
-            "price": float | None,
-            "price_raw": str | None,
-            "price_currency": str | None,
-            "rating": float | None,
-            "image_url": str | None,
-            "description": str | None,
-            "cleaned_content": str,
-            "status": "success",
-        }
-
-    Returns on failure (never raises)::
-
-        {"url": url, "status": "error", "error": str}
-
-    ``price`` is parsed from the source amount without scaling. Currency is
-    populated only when the page provides an ISO code or unambiguous symbol;
-    ``price_raw`` retains the source amount text.
+    The returned keys remain compatible with the existing ANSME pipeline.
+    Failed or clearly unusable pages return status="error"; they are not
+    reported as successful extractions with empty or misleading product data.
     """
     try:
         target = _normalize_url(url)
         html, final_url = await _fetch_html(target)
-
-        # BeautifulSoup + trafilatura are CPU-bound; keep them off the event loop.
         parsed = await asyncio.to_thread(_parse_product_page, html, final_url)
+
+        if parsed["is_blocked_page"]:
+            return _error_result(
+                url,
+                "The retailer returned a block, CAPTCHA, or verification page. "
+                "ANSME could not access reliable product data.",
+                error_code="retailer_blocked",
+            )
+
+        title = parsed["title"]
+        if not title or _is_unusable_title(title):
+            return _error_result(
+                url,
+                "The page did not expose a reliable product title. No analysis was run.",
+                error_code="product_data_unavailable",
+            )
+
+        # A title alone is insufficient: require at least one additional
+        # product-specific signal before claiming extraction succeeded.
+        has_product_signal = (
+            parsed["price"] is not None
+            or parsed["image_url"] is not None
+            or parsed["brand"] is not None
+            or parsed["rating"] is not None
+            or parsed["schema_product_found"]
+        )
+        if not has_product_signal:
+            return _error_result(
+                url,
+                "The page did not expose enough product-specific information "
+                "to extract reliably.",
+                error_code="product_data_unavailable",
+            )
 
         return {
             "url": url,
-            "title": parsed["title"],
+            "title": title,
             "brand": parsed["brand"],
             "price": parsed["price"],
             "price_raw": parsed["price_raw"],
@@ -133,22 +128,61 @@ async def extract_product_data(url: str) -> dict[str, Any]:
             "cleaned_content": parsed["cleaned_content"],
             "status": "success",
         }
-    except Exception as exc:  # noqa: BLE001 - contract: never crash the caller
-        logger.warning("Product extraction failed for %s: %s", url, exc, exc_info=True)
-        return {
-            "url": url,
-            "status": "error",
-            "error": str(exc) or exc.__class__.__name__,
-        }
 
+    except httpx.HTTPStatusError as exc:
+        status_code = exc.response.status_code
+        if status_code == 403:
+            message = (
+                "Access was blocked by the retailer (HTTP 403). "
+                "ANSME cannot extract this page automatically."
+            )
+            code = "retailer_blocked"
+        elif status_code == 404:
+            message = "The retailer says this product page was not found (HTTP 404)."
+            code = "page_not_found"
+        elif status_code in (401, 407, 429):
+            message = (
+                f"The retailer or network denied the request (HTTP {status_code}). "
+                "Try again later or use a retailer-supported data source."
+            )
+            code = "access_restricted"
+        else:
+            message = f"The retailer returned HTTP {status_code}; product data could not be retrieved."
+            code = "http_error"
+        logger.warning("Product extraction failed for %s: HTTP %s", url, status_code)
+        return _error_result(url, message, error_code=code)
 
-# --------------------------------------------------------------------------- #
-# Fetching
-# --------------------------------------------------------------------------- #
+    except httpx.TimeoutException:
+        logger.warning("Product extraction timed out for %s", url)
+        return _error_result(
+            url,
+            "The retailer took too long to respond. Try again later.",
+            error_code="request_timeout",
+        )
+    except httpx.TooManyRedirects:
+        logger.warning("Too many redirects while fetching %s", url)
+        return _error_result(
+            url,
+            "The retailer redirected the request too many times.",
+            error_code="too_many_redirects",
+        )
+    except (httpx.RequestError, ValueError) as exc:
+        logger.warning("Product extraction could not fetch %s: %s", url, exc)
+        return _error_result(
+            url,
+            "The product page could not be retrieved or parsed safely.",
+            error_code="fetch_error",
+        )
+    except Exception:
+        logger.exception("Unexpected product extraction failure for %s", url)
+        return _error_result(
+            url,
+            "An unexpected extraction error occurred. No reliable product data was returned.",
+            error_code="extraction_error",
+        )
 
 
 def _normalize_url(url: str) -> str:
-    """Trim the URL and default to https:// when no scheme is given."""
     if not isinstance(url, str) or not url.strip():
         raise ValueError("URL must be a non-empty string")
     cleaned = url.strip()
@@ -159,35 +193,45 @@ def _normalize_url(url: str) -> str:
         raise ValueError(f"Unsupported URL scheme: {parsed.scheme!r}")
     if not parsed.hostname:
         raise ValueError("URL has no hostname")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing embedded credentials are not supported")
     return cleaned
 
 
 async def _assert_public_host(request: httpx.Request) -> None:
-    """
-    SSRF guard, run for the initial request and for every redirect hop.
-
-    Rejects URLs that resolve to loopback, private, link-local or otherwise
-    non-public addresses.
-    """
+    """Reject private or special-use destinations on every request/redirect."""
     host = request.url.host
-    port = request.url.port or (443 if request.url.scheme == "https" else 80)
+    if not host:
+        raise ValueError("URL has no hostname")
     try:
-        infos = await asyncio.get_running_loop().getaddrinfo(
-            host, port, type=socket.SOCK_STREAM
-        )
-    except socket.gaierror as exc:
-        raise ValueError(f"Could not resolve host: {host}") from exc
+        literal_ip = ipaddress.ip_address(host)
+        addresses = [str(literal_ip)]
+    except ValueError:
+        port = request.url.port or (443 if request.url.scheme == "https" else 80)
+        try:
+            infos = await asyncio.get_running_loop().getaddrinfo(
+                host, port, type=socket.SOCK_STREAM
+            )
+        except socket.gaierror as exc:
+            raise ValueError(f"Could not resolve host: {host}") from exc
+        
+        addresses = [
+            str(info[4][0]).split("%")[0]
+            for info in infos
+        ]
 
-    for info in infos:
-        address = info[4][0].split("%")[0]  # strip IPv6 zone id
-        if not ipaddress.ip_address(address).is_global:
+    if not addresses:
+        raise ValueError("Hostname did not resolve to an address")
+
+    for address in addresses:
+        parsed_ip = ipaddress.ip_address(address)
+        if not parsed_ip.is_global:
             raise ValueError("Refusing to fetch a non-public address")
 
 
 async def _fetch_html(url: str) -> tuple[str, str]:
-    """Download the page and return ``(html, final_url)`` after redirects."""
     async with httpx.AsyncClient(
-        headers=BROWSER_HEADERS,
+        headers=REQUEST_HEADERS,
         timeout=REQUEST_TIMEOUT,
         follow_redirects=True,
         max_redirects=MAX_REDIRECTS,
@@ -195,29 +239,28 @@ async def _fetch_html(url: str) -> tuple[str, str]:
     ) as client:
         async with client.stream("GET", url) as response:
             response.raise_for_status()
-
             content_type = response.headers.get("content-type", "").lower()
             if content_type and not any(
-                t in content_type for t in ("html", "xml", "text/plain")
+                item in content_type for item in ("html", "xml", "text/plain")
             ):
                 raise ValueError(f"Unsupported content type: {content_type}")
 
             body = bytearray()
             async for chunk in response.aiter_bytes():
-                body.extend(chunk)
+                remaining = MAX_RESPONSE_BYTES - len(body)
+                if remaining <= 0:
+                    break
+                body.extend(chunk[:remaining])
                 if len(body) >= MAX_RESPONSE_BYTES:
-                    body = body[:MAX_RESPONSE_BYTES]
                     break
 
-            html = _decode_body(bytes(body), response.charset_encoding)
-            return html, str(response.url)
+            return _decode_body(bytes(body), response.charset_encoding), str(response.url)
 
 
 def _decode_body(body: bytes, header_charset: str | None) -> str:
-    """Decode bytes using the header charset, a <meta charset>, or UTF-8."""
     encoding = header_charset
     if not encoding:
-        match = re.search(rb"charset=[\"']?([\w-]+)", body[:4096], re.IGNORECASE)
+        match = re.search(rb"""charset=["']?([\w-]+)""", body[:4096], re.IGNORECASE)
         encoding = match.group(1).decode("ascii", "ignore") if match else "utf-8"
     try:
         return body.decode(encoding, errors="replace")
@@ -225,23 +268,18 @@ def _decode_body(body: bytes, header_charset: str | None) -> str:
         return body.decode("utf-8", errors="replace")
 
 
-# --------------------------------------------------------------------------- #
-# Parsing orchestration
-# --------------------------------------------------------------------------- #
-
-
 def _parse_product_page(html: str, base_url: str) -> dict[str, Any]:
-    """Synchronous parse step; executed in a worker thread."""
     soup = BeautifulSoup(html, "lxml")
     product = _find_schema_product(soup)
-
     cleaned_content = _extract_cleaned_content(html, base_url)
     if not cleaned_content:
         cleaned_content = _fallback_text(html)
 
-    price = _extract_price_details(soup, product, cleaned_content)
+    blocked = _looks_like_block_page(soup, cleaned_content)
+    title = _extract_title(soup, product, base_url)
+    price = _extract_price_details(soup, product, cleaned_content, base_url)
     return {
-        "title": _extract_title(soup),
+        "title": title,
         "brand": _extract_brand(soup, product),
         "price": price["amount"],
         "price_raw": price["raw"],
@@ -251,23 +289,18 @@ def _parse_product_page(html: str, base_url: str) -> dict[str, Any]:
         "image_url": _extract_image(soup, product, base_url),
         "description": _extract_description(soup, product, cleaned_content),
         "cleaned_content": cleaned_content,
+        "schema_product_found": product is not None,
+        "is_blocked_page": blocked,
     }
 
 
-# --------------------------------------------------------------------------- #
-# Generic helpers
-# --------------------------------------------------------------------------- #
-
-
 def _clean_text(value: Any) -> str:
-    """Collapse whitespace; return '' for non-strings."""
     if not isinstance(value, str):
         return ""
     return re.sub(r"\s+", " ", value).strip()
 
 
 def _meta_content(soup: BeautifulSoup, *keys: str) -> str | None:
-    """Return the first non-empty meta content matching property/name/itemprop."""
     for key in keys:
         for attr in ("property", "name", "itemprop"):
             tag = soup.find("meta", attrs={attr: key})
@@ -278,19 +311,24 @@ def _meta_content(soup: BeautifulSoup, *keys: str) -> str | None:
     return None
 
 
-def _absolute_url(base_url: str, candidate: str | None) -> str | None:
-    """Resolve ``candidate`` against ``base_url``; only http(s) URLs are kept."""
-    if not candidate or not isinstance(candidate, str):
+def _absolute_url(base_url: str, candidate: Any) -> str | None:
+    if isinstance(candidate, dict):
+        candidate = candidate.get("url") or candidate.get("contentUrl")
+    if not isinstance(candidate, str):
         return None
     candidate = candidate.strip()
     if not candidate or candidate.startswith("data:"):
         return None
     absolute = urljoin(base_url, candidate)
-    return absolute if urlparse(absolute).scheme in ("http", "https") else None
+    parsed = urlparse(absolute)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return None
+    if _SKIP_IMAGE_RE.search(parsed.path):
+        return None
+    return absolute
 
 
 def _snippet(text: str, limit: int = DESCRIPTION_SNIPPET_CHARS) -> str | None:
-    """Return the start of ``text`` trimmed to ``limit`` chars on a word boundary."""
     text = _clean_text(text)
     if not text:
         return None
@@ -300,13 +338,7 @@ def _snippet(text: str, limit: int = DESCRIPTION_SNIPPET_CHARS) -> str | None:
     return f"{cut}..."
 
 
-# --------------------------------------------------------------------------- #
-# JSON-LD / schema.org Product
-# --------------------------------------------------------------------------- #
-
-
 def _iter_nodes(node: Any) -> Iterator[dict]:
-    """Yield every dict nested anywhere inside a JSON-LD document."""
     if isinstance(node, dict):
         yield node
         for value in node.values():
@@ -314,17 +346,21 @@ def _iter_nodes(node: Any) -> Iterator[dict]:
                 yield from _iter_nodes(value)
     elif isinstance(node, list):
         for item in node:
-            yield from _iter_nodes(item)
+            if isinstance(item, (dict, list)):
+                yield from _iter_nodes(item)
 
 
 def _is_product_node(node: dict) -> bool:
     node_type = node.get("@type")
     types = node_type if isinstance(node_type, list) else [node_type]
-    return any(isinstance(t, str) and t.lower() in _PRODUCT_TYPES for t in types)
+    return any(
+        isinstance(item, str) and item.rsplit("/", 1)[-1].lower() in _PRODUCT_TYPES
+        for item in types
+    )
 
 
 def _find_schema_product(soup: BeautifulSoup) -> dict | None:
-    """Return the first schema.org Product found in JSON-LD blocks, if any."""
+    candidates: list[dict] = []
     for script in soup.find_all("script", type="application/ld+json"):
         raw = script.string or script.get_text()
         if not raw or not raw.strip():
@@ -333,10 +369,19 @@ def _find_schema_product(soup: BeautifulSoup) -> dict | None:
             data = json.loads(raw)
         except (json.JSONDecodeError, ValueError):
             continue
-        for node in _iter_nodes(data):
-            if _is_product_node(node):
-                return node
-    return None
+        candidates.extend(node for node in _iter_nodes(data) if _is_product_node(node))
+
+    if not candidates:
+        return None
+
+    # Prefer the Product node whose name best agrees with the primary title.
+    primary = soup.select_one("#productTitle")
+    primary_title = _clean_text(primary.get_text(" ")) if primary else ""
+    if primary_title:
+        for candidate in candidates:
+            if _clean_text(str(candidate.get("name", ""))).casefold() == primary_title.casefold():
+                return candidate
+    return candidates[0]
 
 
 def _schema_brand(product: dict) -> str | None:
@@ -352,17 +397,8 @@ def _schema_brand(product: dict) -> str | None:
     return None
 
 
-def _schema_image(product: dict) -> str | None:
-    value = product.get("image")
-    if isinstance(value, list):
-        value = value[0] if value else None
-    if isinstance(value, dict):
-        value = value.get("url") or value.get("contentUrl")
-    return value if isinstance(value, str) and value.strip() else None
-
-
-def _schema_price(product: dict) -> float | None:
-    return _schema_price_details(product)["amount"]
+def _schema_image(product: dict) -> Any:
+    return product.get("image")
 
 
 def _schema_price_details(product: dict) -> dict[str, Any]:
@@ -372,63 +408,56 @@ def _schema_price_details(product: dict) -> dict[str, Any]:
     if not isinstance(offers, list):
         return {"amount": None, "raw": None, "currency": None}
 
+    candidates: list[tuple[Any, str | None]] = []
     for offer in offers:
         if not isinstance(offer, dict):
             continue
-        offer_currency = _normalize_currency(offer.get("priceCurrency"))
-        candidates: list[tuple[Any, str | None]] = [
-            (offer.get("price"), offer_currency),
-            (offer.get("lowPrice"), offer_currency),
-        ]
-
-        spec = offer.get("priceSpecification")
-        for item in spec if isinstance(spec, list) else [spec]:
-            if isinstance(item, dict):
+        currency = _normalize_currency(offer.get("priceCurrency"))
+        availability = str(offer.get("availability", "")).rsplit("/", 1)[-1].lower()
+        # Avoid offers explicitly marked out of stock when an in-stock offer exists.
+        if availability in {"outofstock", "discontinued", "soldout"}:
+            continue
+        candidates.extend(
+            [(offer.get("price"), currency), (offer.get("lowPrice"), currency)]
+        )
+        specs = offer.get("priceSpecification")
+        for spec in specs if isinstance(specs, list) else [specs]:
+            if isinstance(spec, dict):
                 candidates.append(
-                    (
-                        item.get("price"),
-                        _normalize_currency(item.get("priceCurrency"))
-                        or offer_currency,
-                    )
+                    (spec.get("price"), _normalize_currency(spec.get("priceCurrency")) or currency)
                 )
-
-        nested = offer.get("offers")  # AggregateOffer
+        nested = offer.get("offers")
         if nested:
-            details = _schema_price_details({"offers": nested})
-            if details["amount"] is not None:
-                details["currency"] = (
-                    details["currency"] or offer_currency
+            nested_details = _schema_price_details({"offers": nested})
+            if nested_details["amount"] is not None:
+                candidates.append(
+                    (nested_details["amount"], nested_details["currency"] or currency)
                 )
-                return details
 
-        for candidate, currency in candidates:
-            amount = _to_price(candidate)
-            if amount is not None:
-                raw = str(candidate).strip() if candidate is not None else None
-                return {
-                    "amount": amount,
-                    "raw": raw,
-                    "currency": currency or _currency_from_text(raw or ""),
-                }
+    for value, currency in candidates:
+        amount = _to_price(value)
+        if amount is not None:
+            raw = str(value).strip()
+            return {
+                "amount": amount,
+                "raw": raw,
+                "currency": currency or _currency_from_text(raw),
+            }
     return {"amount": None, "raw": None, "currency": None}
 
 
 def _schema_rating(product: dict) -> float | None:
-    """Extract ratingValue from aggregateRating in schema.org Product JSON-LD."""
-    agg = product.get("aggregateRating")
-    if isinstance(agg, dict):
-        rating_val = agg.get("ratingValue")
-        return _to_rating(rating_val)
+    aggregate = product.get("aggregateRating")
+    if isinstance(aggregate, dict):
+        return _to_rating(aggregate.get("ratingValue"))
     return None
 
 
 def _schema_review_count(product: dict | None) -> int | None:
-    """Extract the published review count from schema.org aggregateRating."""
     aggregate = product.get("aggregateRating") if product else None
     if not isinstance(aggregate, dict):
         return None
-    raw = aggregate.get("reviewCount") or aggregate.get("ratingCount")
-    return _to_count(raw)
+    return _to_count(aggregate.get("reviewCount") or aggregate.get("ratingCount"))
 
 
 def _to_count(value: Any) -> int | None:
@@ -441,16 +470,14 @@ def _to_count(value: Any) -> int | None:
     return count if count > 0 else None
 
 
-def _extract_review_count(
-    soup: BeautifulSoup,
-    product: dict | None,
-) -> int | None:
+def _extract_review_count(soup: BeautifulSoup, product: dict | None) -> int | None:
     count = _schema_review_count(product)
     if count is not None:
         return count
     for selector in (
         '[itemprop="reviewCount"]',
         '[itemprop="ratingCount"]',
+        "#acrCustomerReviewText",
         '[class*="review-count" i]',
         '[class*="rating-count" i]',
     ):
@@ -461,77 +488,93 @@ def _extract_review_count(
     return None
 
 
-# --------------------------------------------------------------------------- #
-# Title
-# --------------------------------------------------------------------------- #
+def _is_unusable_title(title: str) -> bool:
+    normalized = re.sub(r"\s+", " ", title).strip().casefold()
+    unusable = {
+        "add to your order",
+        "page not found",
+        "access denied",
+        "robot check",
+        "sorry! something went wrong!",
+        "just a moment...",
+    }
+    return (
+        normalized in unusable
+        or "add to your order" in normalized
+        or "robot check" in normalized
+        or len(normalized) < 3
+    )
 
 
-def _extract_title(soup: BeautifulSoup) -> str:
-    """Priority: <h1> -> og:title -> <title>."""
+def _extract_title(
+    soup: BeautifulSoup, product: dict | None = None, base_url: str = ""
+) -> str:
+    # Amazon's primary product title is more reliable than arbitrary page headings.
+    amazon_title = soup.select_one("#productTitle")
+    if amazon_title:
+        text = _clean_text(amazon_title.get_text(" "))
+        if text and not _is_unusable_title(text):
+            return text
+
+    if product:
+        schema_title = _clean_text(str(product.get("name", "")))
+        if schema_title and not _is_unusable_title(schema_title):
+            return schema_title
+
+    for selector in ('meta[property="og:title"]', 'meta[name="twitter:title"]'):
+        tag = soup.select_one(selector)
+        if tag:
+            text = _clean_text(tag.get("content"))
+            if text and not _is_unusable_title(text):
+                return text
+
     h1 = soup.find("h1")
     if h1:
         text = _clean_text(h1.get_text(" "))
-        if text:
+        if text and not _is_unusable_title(text):
             return text
 
-    og_title = _meta_content(soup, "og:title")
-    if og_title:
-        return og_title
-
-    if soup.title and soup.title.string:
-        text = _clean_text(soup.title.string)
-        if text:
+    title_tag = soup.title
+    if title_tag:
+        text = _clean_text(title_tag.get_text(" "))
+        if text and not _is_unusable_title(text):
             return text
     return ""
 
 
-# --------------------------------------------------------------------------- #
-# Brand
-# --------------------------------------------------------------------------- #
-
-
 def _extract_brand(soup: BeautifulSoup, product: dict | None) -> str | None:
-    """Priority: schema.org Product -> meta tags -> microdata -> None."""
     if product:
         brand = _schema_brand(product)
         if brand:
             return brand
 
-    brand = _meta_content(
-        soup, "product:brand", "og:brand", "brand", "twitter:brand"
-    )
+    amazon_brand = soup.select_one("#bylineInfo")
+    if amazon_brand:
+        text = _clean_text(amazon_brand.get_text(" "))
+        if text:
+            text = re.sub(r"^(?:visit the|brand:)\s*", "", text, flags=re.IGNORECASE)
+            text = re.sub(r"\s+store$", "", text, flags=re.IGNORECASE)
+            return text or None
+
+    brand = _meta_content(soup, "product:brand", "og:brand", "brand", "twitter:brand")
     if brand:
         return brand
 
-    # Microdata: <span itemprop="brand">Acme</span> (or nested itemprop="name")
     node = soup.find(itemprop="brand")
     if node:
         inner = node.select_one('[itemprop="name"]')
-        text = _clean_text((inner or node).get("content") or (inner or node).get_text(" "))
+        source = inner or node
+        text = _clean_text(source.get("content") or source.get_text(" "))
         if text:
             return text
     return None
 
 
-# --------------------------------------------------------------------------- #
-# Price
-# --------------------------------------------------------------------------- #
-
-
 def _parse_price_string(raw: str) -> float | None:
-    """
-    Convert a numeric string to a float, handling regional separators:
-
-        "1,29,999.00" (Indian) -> 129999.0
-        "1,299.99"    (US)     -> 1299.99
-        "1.299,99"    (EU)     -> 1299.99
-        "12,50"                -> 12.5
-    """
     match = _NUMBER_RE.search(raw or "")
     if not match:
         return None
     token = match.group(0).rstrip(".,")
-
     has_comma, has_dot = "," in token, "." in token
     if has_comma and has_dot:
         decimal_sep = "," if token.rfind(",") > token.rfind(".") else "."
@@ -539,13 +582,12 @@ def _parse_price_string(raw: str) -> float | None:
         token = token.replace(thousands_sep, "").replace(decimal_sep, ".")
     elif has_comma:
         is_thousands = bool(
-            re.fullmatch(r"\d{1,3}(,\d{3})+", token)  # 1,299 / 12,500
-            or re.fullmatch(r"\d{1,2}(,\d{2})+,\d{3}", token)  # 1,29,999
+            re.fullmatch(r"\d{1,3}(,\d{3})+", token)
+            or re.fullmatch(r"\d{1,2}(,\d{2})+,\d{3}", token)
         )
         token = token.replace(",", "") if is_thousands else token.replace(",", ".")
     elif has_dot and token.count(".") > 1:
-        token = token.replace(".", "")  # 1.299.000
-
+        token = token.replace(".", "")
     try:
         value = float(token)
     except ValueError:
@@ -563,27 +605,19 @@ def _to_price(value: Any) -> float | None:
     return None
 
 
-def _price_from_text(text: str) -> float | None:
-    """Find the first currency-tagged amount (₹ $ € £) in free text."""
-    match = _PRICE_PREFIX_RE.search(text or "") or _PRICE_SUFFIX_RE.search(text or "")
-    return _parse_price_string(match.group(1)) if match else None
-
-
 def _currency_from_text(raw: str) -> str | None:
-    """Infer currency only from an unambiguous symbol or explicit ISO code."""
-    if re.search(r"\b(?:INR)\b|₹", raw, re.IGNORECASE):
+    if re.search(r"\bINR\b|₹|\bRs\.?\b", raw, re.IGNORECASE):
         return "INR"
-    if re.search(r"\b(?:USD)\b|US\$", raw, re.IGNORECASE):
+    if re.search(r"\bUSD\b|US\$|\$", raw, re.IGNORECASE):
         return "USD"
-    if re.search(r"\b(?:EUR)\b|€", raw, re.IGNORECASE):
+    if re.search(r"\bEUR\b|€", raw, re.IGNORECASE):
         return "EUR"
-    if re.search(r"\b(?:GBP)\b|£", raw, re.IGNORECASE):
+    if re.search(r"\bGBP\b|£", raw, re.IGNORECASE):
         return "GBP"
     return None
 
 
 def _normalize_currency(value: Any) -> str | None:
-    """Keep a source-provided ISO currency code without guessing from region."""
     if not isinstance(value, str):
         return None
     currency = value.strip().upper()
@@ -593,28 +627,83 @@ def _normalize_currency(value: Any) -> str | None:
 
 
 def _is_stale_price_element(element: Any) -> bool:
-    if element.name in ("del", "s", "strike") or element.find_parent(
-        ["del", "s", "strike"]
-    ):
+    if element.name in {"del", "s", "strike"} or element.find_parent(["del", "s", "strike"]):
         return True
     classes = " ".join(element.get("class") or [])
-    return bool(_STALE_PRICE_RE.search(f"{classes} {element.get('id') or ''}"))
+    identifier = element.get("id") or ""
+    return bool(_STALE_PRICE_RE.search(f"{classes} {identifier}"))
 
 
-def _extract_price(
-    soup: BeautifulSoup, product: dict | None, cleaned_content: str
-) -> float | None:
-    """
-    Priority: schema.org offers -> price meta tags -> itemprop="price"
-    -> price-like elements -> first currency amount in page text.
-    """
-    return _extract_price_details(soup, product, cleaned_content)["amount"]
+def _price_details_from_node(node: Any, *, default_currency: str | None = None) -> dict[str, Any]:
+    raw_value = node.get("content") or node.get("value") or node.get_text(" ")
+    raw = _clean_text(str(raw_value))
+    amount = _parse_price_string(raw)
+    if amount is None:
+        return {"amount": None, "raw": None, "currency": None}
+    currency_node = node.find_parent(attrs={"itemtype": re.compile("Offer", re.IGNORECASE)})
+    currency = None
+    if currency_node:
+        currency_tag = currency_node.select_one('[itemprop="priceCurrency"]')
+        if currency_tag:
+            currency = _normalize_currency(
+                currency_tag.get("content") or currency_tag.get_text(" ")
+            )
+    return {
+        "amount": amount,
+        "raw": raw,
+        "currency": currency or _currency_from_text(raw) or default_currency,
+    }
+
+
+def _extract_price(soup: BeautifulSoup, product: dict | None, cleaned_content: str) -> float | None:
+    return _extract_price_details(soup, product, cleaned_content, "").get("amount")
 
 
 def _extract_price_details(
-    soup: BeautifulSoup, product: dict | None, cleaned_content: str
+    soup: BeautifulSoup,
+    product: dict | None,
+    cleaned_content: str,
+    base_url: str = "",
 ) -> dict[str, Any]:
-    """Return the source amount, original text, and only source-supported currency."""
+    # Amazon: only inspect the primary product's price widgets, never page-wide
+    # generic price selectors as a fallback for Amazon.
+    is_amazon = "amazon." in (urlparse(base_url).hostname or "").lower()
+    if is_amazon:
+        for selector in (
+            "#corePrice_feature_div .a-price:not(.a-text-price) .a-offscreen",
+            "#corePrice_feature_div .a-price:not(.a-text-price) .a-price-whole",
+            "#apex_desktop .a-price:not(.a-text-price) .a-offscreen",
+            "#priceblock_dealprice",
+            "#priceblock_ourprice",
+        ):
+            for node in soup.select(selector)[:5]:
+                if _is_stale_price_element(node):
+                    continue
+                raw = _clean_text(node.get("content") or node.get_text(" "))
+                amount = _parse_price_string(raw)
+                if amount is not None:
+                    return {
+                        "amount": amount,
+                        "raw": raw,
+                        "currency": _currency_from_text(raw) or "INR",
+                    }
+
+        # Amazon often publishes price and currency in a scoped JSON blob.
+        for script in soup.find_all("script", type="application/ld+json"):
+            try:
+                data = json.loads(script.string or script.get_text())
+            except (json.JSONDecodeError, ValueError, TypeError):
+                continue
+            for node in _iter_nodes(data):
+                if not _is_product_node(node):
+                    continue
+                details = _schema_price_details(node)
+                if details["amount"] is not None:
+                    return details
+        # Do not fall back to arbitrary page text on Amazon: it commonly contains
+        # accessory/upsell prices unrelated to the requested product.
+        return {"amount": None, "raw": None, "currency": None}
+
     if product:
         details = _schema_price_details(product)
         if details["amount"] is not None:
@@ -623,57 +712,38 @@ def _extract_price_details(
     meta_price = _meta_content(
         soup, "product:price:amount", "og:price:amount", "product:sale_price:amount"
     )
-    if meta_price is not None:
+    if meta_price:
         amount = _parse_price_string(meta_price)
         if amount is not None:
             return {
                 "amount": amount,
                 "raw": meta_price,
                 "currency": _normalize_currency(
-                    _meta_content(
-                        soup, "product:price:currency", "og:price:currency"
-                    )
-                )
-                or _currency_from_text(meta_price),
+                    _meta_content(soup, "product:price:currency", "og:price:currency")
+                ) or _currency_from_text(meta_price),
             }
 
-    for node in soup.select('[itemprop="price"]'):
-        raw_value = node.get("content") or node.get("value") or node.get_text(" ")
-        if isinstance(raw_value, (list, tuple)):
-            raw = " ".join(str(part) for part in raw_value)
-        else:
-            raw = str(raw_value)
-        amount = _parse_price_string(raw)
-        if amount is not None:
-            currency_node = soup.select_one('[itemprop="priceCurrency"]')
-            currency_raw = (
-                currency_node.get("content")
-                or currency_node.get_text(" ")
-                if currency_node
-                else None
-            )
-            return {
-                "amount": amount,
-                "raw": raw.strip(),
-                "currency": _normalize_currency(currency_raw)
-                or _currency_from_text(raw),
-            }
+    for node in soup.select('[itemprop="price"]')[:10]:
+        details = _price_details_from_node(node)
+        if details["amount"] is not None:
+            return details
 
     for node in soup.select('[class*="price" i], [id*="price" i]')[:40]:
         if _is_stale_price_element(node):
             continue
-        raw = node.get_text(" ").strip()
-        text_details = _price_text_details(raw)
-        if text_details["amount"] is not None:
-            return text_details
+        # Skip broad containers that aggregate multiple price elements.
+        if node.select_one('[class*="price" i], [id*="price" i]'):
+            continue
+        details = _price_text_details(node.get_text(" "))
+        if details["amount"] is not None:
+            return details
 
+    # Generic free-text price extraction is a last resort for non-Amazon pages.
     return _price_text_details(cleaned_content[:20000])
 
 
 def _price_text_details(text: str) -> dict[str, Any]:
-    match = _PRICE_PREFIX_RE.search(text or "") or _PRICE_SUFFIX_RE.search(
-        text or ""
-    )
+    match = _PRICE_PREFIX_RE.search(text or "") or _PRICE_SUFFIX_RE.search(text or "")
     if not match:
         return {"amount": None, "raw": None, "currency": None}
     raw = match.group(0).strip()
@@ -684,67 +754,55 @@ def _price_text_details(text: str) -> dict[str, Any]:
     }
 
 
-# --------------------------------------------------------------------------- #
-# Rating
-# --------------------------------------------------------------------------- #
-
-
 def _to_rating(value: Any) -> float | None:
-    """Convert raw value to float bounded within a 0.0 to 5.0 scale."""
     if value is None or isinstance(value, bool):
         return None
     try:
-        val = float(str(value).strip())
-        if 0.0 <= val <= 5.0:
-            return round(val, 2)
-        if 5.0 < val <= 10.0:  # Normalize 10-point scales to 5-point
-            return round(val / 2.0, 2)
-        if 10.0 < val <= 100.0:  # Normalize percentage scales
-            return round((val / 100.0) * 5.0, 2)
+        value_float = float(str(value).strip())
+        if 0 <= value_float <= 5:
+            return round(value_float, 2)
+        if 5 < value_float <= 10:
+            return round(value_float / 2, 2)
+        if 10 < value_float <= 100:
+            return round(value_float / 100 * 5, 2)
     except (ValueError, TypeError):
         pass
     return None
 
 
 def _extract_rating(soup: BeautifulSoup, product: dict | None) -> float | None:
-    """
-    Priority: schema.org aggregateRating -> meta tags -> itemprop="ratingValue"
-    -> rating text elements.
-    """
     if product:
         rating = _schema_rating(product)
         if rating is not None:
             return rating
 
-    meta_rating = _meta_content(
-        soup, "og:rating", "twitter:rating", "product:rating:value"
-    )
-    if meta_rating:
-        rating = _to_rating(meta_rating)
-        if rating is not None:
-            return rating
-
-    for node in soup.select('[itemprop="ratingValue"]'):
-        raw = node.get("content") or node.get_text(" ")
-        rating = _to_rating(raw)
-        if rating is not None:
-            return rating
-
-    # Pattern search in elements containing rating indicators
-    for node in soup.select('[class*="rating" i], [id*="rating" i]')[:20]:
-        text = node.get_text(" ")
-        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:out of|\/)\s*5", text, re.IGNORECASE)
+    amazon_rating = soup.select_one("#acrPopover")
+    if amazon_rating:
+        title = str(amazon_rating.get("title") or "")
+        match = re.search(r"(\d+(?:\.\d+)?)\s*out of", title, re.I)
         if match:
             rating = _to_rating(match.group(1))
             if rating is not None:
                 return rating
 
+    meta_rating = _meta_content(soup, "og:rating", "twitter:rating", "product:rating:value")
+    if meta_rating:
+        rating = _to_rating(meta_rating)
+        if rating is not None:
+            return rating
+
+    for node in soup.select('[itemprop="ratingValue"]')[:10]:
+        rating = _to_rating(node.get("content") or node.get_text(" "))
+        if rating is not None:
+            return rating
+
+    for node in soup.select('[class*="rating" i], [id*="rating" i]')[:20]:
+        match = re.search(r"(\d+(?:\.\d+)?)\s*(?:out of|/)\s*5", node.get_text(" "), re.I)
+        if match:
+            rating = _to_rating(match.group(1))
+            if rating is not None:
+                return rating
     return None
-
-
-# --------------------------------------------------------------------------- #
-# Image
-# --------------------------------------------------------------------------- #
 
 
 def _dimension(value: Any) -> int | None:
@@ -752,87 +810,139 @@ def _dimension(value: Any) -> int | None:
     return int(match.group(1)) if match else None
 
 
+def _is_valid_image_url(candidate: str | None) -> bool:
+    if not candidate:
+        return False
+    parsed = urlparse(candidate)
+    if parsed.scheme not in ("http", "https") or not parsed.hostname:
+        return False
+    if _SKIP_IMAGE_RE.search(parsed.path):
+        return False
+    return True
+
+
 def _first_large_image(soup: BeautifulSoup, base_url: str) -> str | None:
-    """
-    Return the first <img> that looks like a real product image.
-
-    Images with declared dimensions must be at least MIN_IMAGE_DIMENSION px.
-    Images with no declared size are only used if nothing better is found.
-    """
-    unsized_fallback: str | None = None
-
+    unsized_fallback = None
     for img in soup.find_all("img"):
         src_value = (
-            img.get("src")
+            img.get("data-old-hires")
             or img.get("data-src")
             or img.get("data-lazy-src")
             or img.get("data-original")
+            or img.get("src")
         )
-        if not isinstance(src_value, str):
+        if not isinstance(src_value, str) or not src_value:
             continue
-        src = src_value
-        if not src or _SKIP_IMAGE_RE.search(src):
+        absolute = _absolute_url(base_url, src_value)
+        if not absolute or not _is_valid_image_url(absolute):
             continue
-        if src.lower().split("?")[0].endswith((".svg", ".gif")):
+        if absolute.lower().split("?")[0].endswith((".svg", ".gif")):
             continue
-
-        absolute = _absolute_url(base_url, src)
-        if not absolute:
-            continue
-
-        dims = [d for d in (_dimension(img.get("width")), _dimension(img.get("height"))) if d]
+        dims = [
+            dimension
+            for dimension in (_dimension(img.get("width")), _dimension(img.get("height")))
+            if dimension
+        ]
         if dims:
             if min(dims) >= MIN_IMAGE_DIMENSION:
                 return absolute
             continue
         unsized_fallback = unsized_fallback or absolute
-
     return unsized_fallback
 
 
-def _extract_image(
-    soup: BeautifulSoup, product: dict | None, base_url: str
-) -> str | None:
-    """Priority: og:image -> twitter:image -> first large image -> schema image."""
+def _extract_image(soup: BeautifulSoup, product: dict | None, base_url: str) -> str | None:
+    is_amazon = "amazon." in (urlparse(base_url).hostname or "").lower()
+    if is_amazon:
+        image_node = soup.select_one("#landingImage, #imgBlkFront")
+        if image_node:
+            candidates = [
+                image_node.get("data-old-hires"),
+                image_node.get("src"),
+                image_node.get("data-src"),
+            ]
+            dynamic_images = image_node.get("data-a-dynamic-image")
+            if isinstance(dynamic_images, str) and dynamic_images:
+                try:
+                    dynamic = json.loads(dynamic_images)
+                    candidates.extend(
+                        sorted(
+                            dynamic.keys(),
+                            key=lambda item: dynamic[item][0] * dynamic[item][1]
+                            if isinstance(dynamic[item], list) and len(dynamic[item]) >= 2
+                            else 0,
+                            reverse=True,
+                        )
+                    )
+                except (json.JSONDecodeError, TypeError, ValueError):
+                    pass
+            for candidate in candidates:
+                absolute = _absolute_url(base_url, candidate)
+                if absolute and _is_valid_image_url(absolute):
+                    return absolute
+
+        if product:
+            schema_image = _schema_image(product)
+            candidates = schema_image if isinstance(schema_image, list) else [schema_image]
+            for candidate in candidates:
+                absolute = _absolute_url(base_url, candidate)
+                if absolute and _is_valid_image_url(absolute):
+                    return absolute
+        return None
+
+    # General sites: product schema image first, then social metadata, then a
+    # large image. Avoid returning obviously promotional banner URLs.
+    if product:
+        schema_image = _schema_image(product)
+        candidates = schema_image if isinstance(schema_image, list) else [schema_image]
+        for candidate in candidates:
+            absolute = _absolute_url(base_url, candidate)
+            if absolute and _is_valid_image_url(absolute):
+                return absolute
+
     for key in ("og:image", "og:image:secure_url", "twitter:image", "twitter:image:src"):
         image = _absolute_url(base_url, _meta_content(soup, key))
-        if image:
+        if image and _is_valid_image_url(image):
             return image
-
-    image = _first_large_image(soup, base_url)
-    if image:
-        return image
-
-    if product:
-        return _absolute_url(base_url, _schema_image(product))
-    return None
+    return _first_large_image(soup, base_url)
 
 
-# --------------------------------------------------------------------------- #
-# Description & content
-# --------------------------------------------------------------------------- #
+def _looks_like_block_page(soup: BeautifulSoup, text: str) -> bool:
+    title = _clean_text(soup.title.get_text(" ")) if soup.title else ""
+    combined = f"{title} {text[:6000]}".casefold()
+    indicators = (
+        "robot check",
+        "enter the characters you see below",
+        "captcha",
+        "verify you are human",
+        "automated access",
+        "unusual traffic",
+        "access denied",
+        "request blocked",
+        "temporarily blocked",
+        "security check",
+        "enable javascript and cookies to continue",
+    )
+    if any(indicator in combined for indicator in indicators):
+        return True
+    # Common Amazon interstitial IDs without relying on page text alone.
+    return bool(soup.select_one("#captchacharacters, form[action*='validateCaptcha']"))
 
 
 def _extract_description(
     soup: BeautifulSoup, product: dict | None, cleaned_content: str
 ) -> str | None:
-    """Priority: meta description -> og:description -> cleaned content snippet."""
-    description = _meta_content(soup, "description") or _meta_content(
-        soup, "og:description"
-    )
+    if product:
+        description = _clean_text(str(product.get("description", "")))
+        if description:
+            return description
+    description = _meta_content(soup, "description", "og:description")
     if description:
         return description
-
-    if product:
-        schema_description = _clean_text(product.get("description"))
-        if schema_description:
-            return schema_description
-
     return _snippet(cleaned_content)
 
 
 def _extract_cleaned_content(html: str, url: str) -> str:
-    """Readable main-content text via trafilatura ('' if nothing is found)."""
     try:
         text = trafilatura.extract(
             html,
@@ -842,14 +952,13 @@ def _extract_cleaned_content(html: str, url: str) -> str:
             include_links=False,
             favor_recall=True,
         )
-    except Exception as exc:  # noqa: BLE001 - trafilatura failure must not abort
+    except Exception as exc:
         logger.debug("trafilatura failed for %s: %s", url, exc)
         return ""
     return (text or "").strip()
 
 
 def _fallback_text(html: str) -> str:
-    """Plain visible text, used only when trafilatura returns nothing."""
     soup = BeautifulSoup(html, "lxml")
     for tag in soup(["script", "style", "noscript", "template", "svg"]):
         tag.decompose()
