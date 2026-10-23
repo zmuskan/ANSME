@@ -21,6 +21,7 @@ from app.api.history import router as history_router
 from app.api.leaderboard import router as leaderboard_router
 from app.auth import get_current_user_id
 from app.db.database import Base, get_db
+from app.main import app as production_app
 from app.models.analysis import Analysis
 from app.models.evidence import Evidence
 from app.models.price_history import PriceHistory
@@ -284,6 +285,107 @@ class UserDataApiTests(unittest.TestCase):
         self.assertEqual(response.json()["successful_count"], 1)
         persist.assert_not_called()
 
+    def test_analysis_saved_to_history_can_be_retrieved_by_same_user(self) -> None:
+        result = {
+            "url": "https://shop.example/saved-item",
+            "status": "success",
+            "overall_score": 7.5,
+            "verdict": "CONSIDER",
+            "analysis": {"pros": [], "cons": []},
+        }
+        with patch.object(
+            analyze_module,
+            "_process_url",
+            new=AsyncMock(return_value=result),
+        ):
+            response = self.client.post(
+                "/analyze",
+                json={"urls": [result["url"]], "save_history": True},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        saved_product = response.json()["products"][0]
+        self.assertTrue(saved_product["history_saved"])
+
+        history = self.client.get("/history?limit=100&offset=0")
+        self.assertEqual(history.status_code, 200)
+        self.assertEqual(len(history.json()), 1)
+        analysis_id = history.json()[0]["id"]
+        detail = self.client.get(f"/history/{analysis_id}")
+        self.assertEqual(detail.status_code, 200)
+        self.assertEqual(detail.json()["url"], result["url"])
+
+    def test_production_cors_covers_put_and_unhandled_errors(self) -> None:
+        fastapi_app = production_app.app
+        original_overrides = dict(fastapi_app.dependency_overrides)
+
+        def override_get_db():
+            with self.session_factory() as session:
+                yield session
+
+        fastapi_app.dependency_overrides[get_db] = override_get_db
+        fastapi_app.dependency_overrides[get_current_user_id] = lambda: self.user_id
+        try:
+            with TestClient(
+                production_app,
+                raise_server_exceptions=False,
+            ) as client:
+                with patch.object(
+                    AnalysisRepository,
+                    "list_analyses",
+                    side_effect=RuntimeError("simulated unhandled failure"),
+                ):
+                    failure = client.get(
+                        "/history",
+                        headers={"Origin": "http://localhost:8080"},
+                    )
+                success = client.get(
+                    "/history",
+                    headers={"Origin": "http://localhost:8080"},
+                )
+                handled_error = client.get(
+                    "/history/999999",
+                    headers={"Origin": "http://localhost:8080"},
+                )
+                preflight = client.options(
+                    "/leaderboard/participation",
+                    headers={
+                        "Origin": "http://127.0.0.1:8080",
+                        "Access-Control-Request-Method": "PUT",
+                        "Access-Control-Request-Headers": (
+                            "authorization,content-type"
+                        ),
+                    },
+                )
+
+            self.assertEqual(failure.status_code, 500)
+            self.assertEqual(
+                failure.headers.get("access-control-allow-origin"),
+                "http://localhost:8080",
+            )
+            self.assertEqual(success.status_code, 200)
+            self.assertEqual(
+                success.headers.get("access-control-allow-origin"),
+                "http://localhost:8080",
+            )
+            self.assertEqual(handled_error.status_code, 404)
+            self.assertEqual(
+                handled_error.headers.get("access-control-allow-origin"),
+                "http://localhost:8080",
+            )
+            self.assertEqual(preflight.status_code, 200)
+            self.assertEqual(
+                preflight.headers.get("access-control-allow-origin"),
+                "http://127.0.0.1:8080",
+            )
+            self.assertIn(
+                "PUT",
+                preflight.headers.get("access-control-allow-methods", ""),
+            )
+        finally:
+            fastapi_app.dependency_overrides.clear()
+            fastapi_app.dependency_overrides.update(original_overrides)
+
     def test_analysis_reports_persistence_failure_and_cleans_partial_row(self) -> None:
         result = {
             "url": "https://shop.example/item",
@@ -358,8 +460,22 @@ class UserDataApiTests(unittest.TestCase):
 
     def test_history_routes_require_authentication(self) -> None:
         self.app.dependency_overrides.pop(get_current_user_id)
-        response = self.client.get("/history")
-        self.assertEqual(response.status_code, 401)
+        protected_requests = (
+            ("get", "/history"),
+            ("get", "/history/1"),
+            ("delete", "/history/1"),
+            ("get", "/analytics?days=30"),
+            ("get", "/leaderboard/participation"),
+            ("put", "/leaderboard/participation"),
+        )
+        for method, path in protected_requests:
+            response = getattr(self.client, method)(
+                path,
+                **({"json": {"enabled": True}} if method == "put" else {}),
+            )
+            self.assertEqual(response.status_code, 401, f"{method.upper()} {path}")
+
+        self.assertEqual(self.client.get("/leaderboard").status_code, 200)
 
 
 if __name__ == "__main__":

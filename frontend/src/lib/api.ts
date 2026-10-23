@@ -12,6 +12,27 @@ async function authenticatedHeaders(): Promise<Headers> {
   return headers;
 }
 
+
+async function getApiError(response: Response, fallback: string): Promise<Error> {
+  let detail = "";
+
+  try {
+    const body = await response.json();
+    detail =
+      typeof body.detail === "string"
+        ? body.detail
+        : typeof body.message === "string"
+          ? body.message
+          : "";
+  } catch {
+    // The response may not contain JSON.
+  }
+
+  return new Error(
+    `${fallback} (HTTP ${response.status})${detail ? `: ${detail}` : ""}`,
+  );
+}
+
 export interface ProductAnalysis {
   sentiment_score: number;
   requirement_match: number;
@@ -193,7 +214,7 @@ export async function getHistory(limit = 50): Promise<HistoryRecord[]> {
   });
 
   if (!response.ok) {
-    throw new Error("Failed to load history");
+    throw await getApiError(response, "Failed to load history");
   }
 
   return response.json() as Promise<HistoryRecord[]>;
@@ -231,7 +252,7 @@ export async function getAnalytics(days?: number): Promise<AnalyticsSummary> {
   const response = await fetch(`${API_BASE}/analytics${params}`, { headers });
 
   if (!response.ok) {
-    throw new Error("Failed to load analytics");
+    throw await getApiError(response, "Failed to load analytics");
   }
 
   return response.json() as Promise<AnalyticsSummary>;

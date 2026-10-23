@@ -8,8 +8,8 @@ Wires the first end-to-end ANSME pipeline:
 All recommendations come from deterministic Python code. This module only
 receives the request, orchestrates the services, delegates persistence to the
 repository layer, and shapes the response. A failure on one URL never fails
-the whole request, and a failure to persist one result never affects the
-others.
+the whole request, and a failure to persist one result is reported without
+discarding the analysis result.
 """
 
 from __future__ import annotations
@@ -78,7 +78,8 @@ async def analyze(
         )
     )
 
-    _persist_successful_products(db, products, user_id)
+    if request.save_history:
+        _persist_successful_products(db, products, user_id)
 
     successful = sum(1 for p in products if p.get("status") == "success")
     failed = len(products) - successful
@@ -108,19 +109,20 @@ def _persist_successful_products(
     """
     Persist every successful product result via ``AnalysisRepository``.
 
-    Each result is saved independently. If one insert fails, the failure is
-    logged and processing continues with the remaining results, so one bad
-    row never prevents the others from being saved.
+    Each result is saved independently. A failed save is reported on that
+    product, and any partially persisted analysis is removed when possible.
     """
     for product in products:
         if product.get("status") != "success":
             continue
 
+        analysis_id: int | None = None
         try:
             analysis = AnalysisRepository.create_analysis(
                 db,
                 _build_analysis_data(product, user_id),
             )
+            analysis_id = analysis.id
             if product.get("price") is not None:
                 PriceHistoryRepository.create(
                     db,
@@ -158,9 +160,20 @@ def _persist_successful_products(
                 }
                 for item in AnalysisRepository.find_similar(db, analysis, user_id)
             ]
+            product["history_saved"] = True
         except (SQLAlchemyError, KeyError, TypeError, ValueError):
-            logger.exception(
-                "Failed to save analysis result for %s", product.get("url")
+            db.rollback()
+            if analysis_id is not None:
+                try:
+                    AnalysisRepository.delete_analysis(db, analysis_id, user_id)
+                except SQLAlchemyError:
+                    logger.exception(
+                        "Failed to remove incomplete analysis after a save failure"
+                    )
+            logger.exception("Failed to save analysis result")
+            product["history_saved"] = False
+            product["history_save_error"] = (
+                "Analysis completed, but it could not be saved to your history."
             )
 
 

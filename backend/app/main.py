@@ -12,33 +12,37 @@ from app.api.history import router as history_router
 from app.api.analytics import router as analytics_router
 from app.api.leaderboard import router as leaderboard_router
 
-app = FastAPI(
+fastapi_app = FastAPI(
     title="ANSME Decision Engine",
     version="1.0.0"
 )
 
-app.add_middleware(
-    CORSMiddleware,
+fastapi_app.include_router(health_router)
+fastapi_app.include_router(analyze_router)
+fastapi_app.include_router(history_router)
+fastapi_app.include_router(analytics_router)
+fastapi_app.include_router(leaderboard_router)
+
+
+@fastapi_app.on_event("startup")
+def create_tables():
+    Base.metadata.create_all(bind=engine)
+
+
+@fastapi_app.get("/")
+def root():
+    return {
+        "message": "ANSME Backend Running"
+    }
+
+
+app = CORSMiddleware(
+    app=fastapi_app,
     allow_origins=[
         "http://localhost:8080",
         "http://127.0.0.1:8080",
     ],
     allow_credentials=True,
-    allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
+    allow_methods=["GET", "POST", "PUT", "DELETE", "OPTIONS"],
     allow_headers=["Authorization", "Content-Type"],
 )
-app.include_router(health_router)
-app.include_router(analyze_router)
-app.include_router(history_router)
-app.include_router(analytics_router)
-app.include_router(leaderboard_router)
-
-@app.on_event("startup")
-def create_tables():
-    Base.metadata.create_all(bind=engine)
-
-@app.get("/")
-def root():
-    return {
-        "message": "ANSME Backend Running"
-    }
