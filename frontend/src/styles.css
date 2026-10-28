@@ -524,3 +524,54 @@
   .product-summary-stats { grid-template-columns: repeat(3, minmax(0, 1fr)); }
   .comparison-table { min-width: 31rem; }
 }
+
+/* Production fix: prevent analysis results from overflowing */
+.result-panel,
+.result-panel > *,
+.result-hero,
+.result-hero > *,
+.result-section,
+.score-breakdown,
+.score-metrics,
+.score-metric,
+.evidence-grid,
+.price-summary {
+  min-width: 0;
+  max-width: 100%;
+}
+
+.result-hero {
+  grid-template-columns: minmax(0, 1fr) minmax(0, 0.72fr);
+}
+
+.score-metrics {
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+}
+
+.result-hero-image {
+  width: 100%;
+  background: oklch(.04 .015 250 / 72%);
+}
+
+.result-hero-image img {
+  display: block;
+  width: 100%;
+  height: 100%;
+  object-fit: contain;
+}
+
+@media (max-width: 700px) {
+  .score-metrics {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .result-hero {
+    grid-template-columns: minmax(0, 1fr) minmax(0, .7fr);
+  }
+}
+
+@media (max-width: 430px) {
+  .result-hero {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
