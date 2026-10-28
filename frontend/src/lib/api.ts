@@ -91,6 +91,7 @@ export interface SuccessfulProduct {
     verdict: string;
   }>;
   analysis: ProductAnalysis;
+  budget_status?: "not_provided" | "applied" | "unverified" | "legacy_numeric";
   history_saved?: boolean;
   history_save_error?: string;
 }
@@ -108,6 +109,34 @@ export interface AnalyzeProductResponse {
   failed_count: number;
   budget: number | null;
   products: Array<SuccessfulProduct | FailedProduct>;
+}
+
+export interface ProductComparison {
+  winning_key: "product_a" | "product_b" | "tie";
+  score_difference: number;
+}
+
+export async function compareProducts(
+  productA: SuccessfulProduct,
+  productB: SuccessfulProduct,
+): Promise<ProductComparison> {
+  const headers = await authenticatedHeaders();
+  headers.set("Content-Type", "application/json");
+
+  const response = await fetch(`${API_BASE}/analytics/compare`, {
+    method: "POST",
+    headers,
+    body: JSON.stringify({
+      product_a: productA,
+      product_b: productB,
+    }),
+  });
+
+  if (!response.ok) {
+    throw await getApiError(response, "Failed to compare products");
+  }
+
+  return response.json() as Promise<ProductComparison>;
 }
 
 export interface HistoryRecord {
@@ -178,19 +207,30 @@ export interface HistoryAnalysis extends HistoryRecord {
 }
 
 export async function analyzeProduct(
-  url: string,
+  url: string | string[],
   budget?: number,
   requirements?: string,
   saveHistory = true,
+  budgetCurrency?: string | null,
 ): Promise<AnalyzeProductResponse> {
   const headers = await authenticatedHeaders();
   headers.set("Content-Type", "application/json");
+
+  const urls = (Array.isArray(url) ? url : [url])
+    .map((item) => item.trim())
+    .filter(Boolean);
+
+  if (urls.length === 0) {
+    throw new Error("Provide at least one product URL.");
+  }
+
   const response = await fetch(`${API_BASE}/analyze`, {
     method: "POST",
     headers,
     body: JSON.stringify({
-      urls: [url],
+      urls,
       budget,
+      budget_currency: budgetCurrency,
       requirements,
       save_history: saveHistory,
     }),
@@ -202,7 +242,8 @@ export async function analyzeProduct(
         "Your sign-in session is missing or expired. Please sign in again and retry the analysis."
       );
     }
-    throw new Error("Analysis failed");
+    const message = await response.text();
+    throw new Error(message || "Analysis failed");
   }
 
   return response.json() as Promise<AnalyzeProductResponse>;

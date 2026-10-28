@@ -16,12 +16,12 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import time
 from typing import Any
 from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import Session
 
 from app.auth import get_current_user_id
@@ -73,7 +73,14 @@ async def analyze(
     semaphore = asyncio.Semaphore(MAX_CONCURRENT_EXTRACTIONS)
     products = await asyncio.gather(
         *(
-            _process_url(url, request.budget, semaphore, request.requirements)
+            _process_url(
+                url,
+                request.budget,
+                semaphore,
+                request.requirements,
+                request.budget_currency,
+                "budget_currency" in request.model_fields_set,
+            )
             for url in urls
         )
     )
@@ -161,12 +168,15 @@ def _persist_successful_products(
                 for item in AnalysisRepository.find_similar(db, analysis, user_id)
             ]
             product["history_saved"] = True
-        except (SQLAlchemyError, KeyError, TypeError, ValueError):
-            db.rollback()
+        except Exception:
+            try:
+                db.rollback()
+            except Exception:
+                logger.exception("Failed to roll back analysis persistence")
             if analysis_id is not None:
                 try:
                     AnalysisRepository.delete_analysis(db, analysis_id, user_id)
-                except SQLAlchemyError:
+                except Exception:
                     logger.exception(
                         "Failed to remove incomplete analysis after a save failure"
                     )
@@ -216,6 +226,8 @@ async def _process_url(
     budget: float | None,
     semaphore: asyncio.Semaphore,
     requirements: str | None = None,
+    budget_currency: str | None = None,
+    budget_currency_is_explicit: bool = False,
 ) -> dict[str, Any]:
     """
     Run the full pipeline for one URL without ever raising.
@@ -238,13 +250,29 @@ async def _process_url(
             rating=product.get("rating"),
             requirements=requirements,
         )
+        effective_budget = budget
+        budget_status = (
+            "not_provided"
+            if budget is None
+            else "applied"
+            if budget_currency_is_explicit
+            else "legacy_numeric"
+        )
+        if budget is not None and budget_currency_is_explicit:
+            if (
+                not _currencies_match(budget_currency, product.get("price_currency"))
+                or not _has_usable_price(product.get("price"))
+            ):
+                effective_budget = None
+                budget_status = "unverified"
         verdict = compute_verdict(
             price=product.get("price"),
             rating=product.get("rating"),
-            budget=budget,
+            budget=effective_budget,
         )
-        
+
         result = _merge_product_and_verdict(product, verdict)
+        result["budget_status"] = budget_status
         result["analysis"] = analysis
         result["sources_analyzed"] = 1
         result["category"] = _classify_category(
@@ -276,6 +304,32 @@ async def _process_url(
             "status": "error",
             "error": str(exc) or exc.__class__.__name__,
         }
+
+
+def _currencies_match(currency_a: Any, currency_b: Any) -> bool:
+    """Return whether two valid ISO-style currency codes match."""
+    if not all(isinstance(currency, str) for currency in (currency_a, currency_b)):
+        return False
+    normalized_a = currency_a.strip()
+    normalized_b = currency_b.strip()
+    return (
+        all(
+            len(currency) == 3 and currency.isascii() and currency.isalpha()
+            for currency in (normalized_a, normalized_b)
+        )
+        and normalized_a.upper() == normalized_b.upper()
+    )
+
+
+def _has_usable_price(value: Any) -> bool:
+    """Return whether a product price is finite and positive."""
+    if value is None or isinstance(value, bool):
+        return False
+    try:
+        price = float(value)
+    except (TypeError, ValueError, OverflowError):
+        return False
+    return math.isfinite(price) and price > 0
 
 
 def _build_error(url: str, product: Any) -> dict[str, Any]:

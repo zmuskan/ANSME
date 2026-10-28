@@ -4,7 +4,7 @@ import { motion } from "motion/react";
 import { CartesianGrid, Cell, Line, LineChart, Pie, PieChart, ResponsiveContainer, Tooltip, XAxis, YAxis } from "recharts";
 import { Bell, Check, ChevronRight, Clock3, Download, Headphones, History, Home, Menu, Plus, Search, Settings, ShieldCheck, Sparkles, Trash2, Trophy, X } from "lucide-react";
 import { createContext, type Dispatch, type FormEvent, type ReactNode, type SetStateAction, useContext, useEffect, useMemo, useState } from "react";
-import { analyzeProduct, deleteHistoryItem, getAllHistory, getAnalytics, getHistoryItem, getLeaderboard, getLeaderboardParticipation, setLeaderboardParticipation, type AnalyticsSummary, type HistoryRecord, type LeaderboardItem, type SuccessfulProduct } from "@/lib/api";
+import { analyzeProduct, compareProducts as compareProductsApi, deleteHistoryItem, getAllHistory, getAnalytics, getHistoryItem, getLeaderboard, getLeaderboardParticipation, setLeaderboardParticipation, type AnalyticsSummary, type FailedProduct, type HistoryRecord, type LeaderboardItem, type ProductComparison, type SuccessfulProduct } from "@/lib/api";
 import { deleteHistoryRecords } from "@/lib/history-actions";
 import { signInAsGuest, signInWithGoogle, useAuth } from "@/lib/auth";
 import authAsset from "@/assets/01_auth_background.mp4";
@@ -16,18 +16,38 @@ import comparisonAsset from "@/assets/05_comparison_background.png";
 import historyAsset from "@/assets/06_history_background.png";
 import settingsAsset from "@/assets/07_settings_background.png";
 
-export interface AnalysisRequest { urls: string[]; budget: string; requirements: string }
+export interface AnalysisRequest {
+  urls: string[];
+  budget: string;
+  budgetCurrency: string;
+  requirements: string;
+}
 export type SingleResult = SuccessfulProduct;
-export interface ComparisonResult { products: SuccessfulProduct[] }
+export interface ComparisonResult {
+  products: SuccessfulProduct[];
+  failedProducts: FailedProduct[];
+  pairwiseComparisons: Array<{
+    productAIndex: number;
+    productBIndex: number;
+    result: ProductComparison;
+  }>;
+  comparisonError?: string;
+}
 export interface HistoryItem { id: string; title: string; url: string; date: string; verdict: string; price: string; score: number }
 export interface UserSettings { saveHistory: boolean; personalizedAdvice: boolean; notifications: boolean; shareToLeaderboard: boolean; theme: "system" | "dark" | "light" }
 
-type AppState = { request: AnalysisRequest; setRequest: (r: AnalysisRequest) => void; result: SingleResult | null; setResult: (r: SingleResult) => void; comparison: ComparisonResult | null; setComparison: (c: ComparisonResult) => void; history: HistoryItem[]; setHistory: Dispatch<SetStateAction<HistoryItem[]>>; settings: UserSettings; setSettings: Dispatch<SetStateAction<UserSettings>> };
+type AppState = { request: AnalysisRequest; setRequest: (r: AnalysisRequest) => void; result: SingleResult | null; setResult: (r: SingleResult) => void; comparison: ComparisonResult | null; setComparison: (c: ComparisonResult) => void; analysisFailures: FailedProduct[]; setAnalysisFailures: (failures: FailedProduct[]) => void; history: HistoryItem[]; setHistory: Dispatch<SetStateAction<HistoryItem[]>>; settings: UserSettings; setSettings: Dispatch<SetStateAction<UserSettings>> };
 const AppContext = createContext<AppState | undefined>(undefined);
 export function AppProvider({ children }: { children: ReactNode }) {
-  const [request, setRequest] = useState<AnalysisRequest>({ urls: [], budget: "", requirements: "" });
+  const [request, setRequest] = useState<AnalysisRequest>({
+    urls: [],
+    budget: "",
+    budgetCurrency: "INR",
+    requirements: "",
+  });
   const [result, setResult] = useState<SingleResult | null>(null);
   const [comparison, setComparison] = useState<ComparisonResult | null>(null);
+  const [analysisFailures, setAnalysisFailures] = useState<FailedProduct[]>([]);
   const [history, setHistory] = useState<HistoryItem[]>([]);
   const [settings, setSettings] = useState<UserSettings>(() => {
     const defaults: UserSettings = {
@@ -86,7 +106,7 @@ export function AppProvider({ children }: { children: ReactNode }) {
       console.error("Unable to persist settings.", error);
     }
   }, [settings]);
-  const value = useMemo(() => ({ request, setRequest, result, setResult, comparison, setComparison, history, setHistory, settings, setSettings }), [request, result, comparison, history, settings]);
+  const value = useMemo(() => ({ request, setRequest, result, setResult, comparison, setComparison, analysisFailures, setAnalysisFailures, history, setHistory, settings, setSettings }), [request, result, comparison, analysisFailures, history, settings]);
   return <AppContext.Provider value={value}>{children}</AppContext.Provider>;
 }
 export function useAnsme() { const value = useContext(AppContext); if (!value) throw new Error("ANSME provider missing"); return value; }
@@ -150,7 +170,7 @@ export function AuthScreen() {
   return <main className="ansme-screen overflow-hidden"><div className="portrait-stage"><video className="screen-art" autoPlay muted loop playsInline><source src={authWebmAsset} type="video/webm" /><source src={authAsset} type="video/mp4" /></video><div className="auth-overlay"><button type="button" className="action-button google-button" onClick={() => void handleGoogleSignIn()} disabled={signInMethod !== null}><span className="google-g">G</span> {signInMethod === "google" ? "Signing in…" : "Continue with Google"}</button><button type="button" className="action-button guest-button" onClick={() => void handleGuestSignIn()} disabled={signInMethod !== null}>{signInMethod === "guest" ? "Signing in…" : "Continue as Guest"}</button>{(error || authError) && <p className="analysis-error" role="alert">{error ?? authError?.message}</p>}<div className="trust-line"><span><ShieldCheck className="size-4" />Research first. Regret less.</span><small>No spam. No bore. Just decisions.</small></div></div></div></main>;
 }
 export function WorkspaceScreen() {
-  const navigate = useNavigate(); const { request, setRequest, setResult, setComparison, result, settings } = useAnsme(); const [urls, setUrls] = useState<string[]>(request.urls.length ? request.urls : [""]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null); const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null); const [analyticsDays, setAnalyticsDays] = useState<number | undefined>(30);
+  const navigate = useNavigate(); const { request, setRequest, setResult, setComparison, setAnalysisFailures, result, settings } = useAnsme(); const [urls, setUrls] = useState<string[]>(request.urls.length ? request.urls : [""]); const [loading, setLoading] = useState(false); const [error, setError] = useState<string | null>(null); const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null); const [analyticsDays, setAnalyticsDays] = useState<number | undefined>(30);
 
   useEffect(() => {
     const loadAnalytics = async () => {
@@ -186,43 +206,78 @@ export function WorkspaceScreen() {
   function removeUrl(index: number) { setUrls((current) => current.filter((_, urlIndex) => urlIndex !== index)); }
   async function submit(e: FormEvent) {
     e.preventDefault();
+
     const validUrls = urls.map((url) => url.trim()).filter(Boolean);
     if (!validUrls.length) return;
-    const firstUrl = validUrls[0];
-    if (!firstUrl) return;
 
     setRequest({ ...request, urls: validUrls });
+    setAnalysisFailures([]);
     setError(null);
     setLoading(true);
 
     try {
       const budget = parseBudget(request.budget);
-      if (validUrls.length === 1) {
-        const result = await analyzeProduct(firstUrl, budget, request.requirements, settings.saveHistory);
-        console.log(result);
-        const product = result.products[0];
-        if (!product || product.status !== "success") {
-          throw new Error(product?.status === "error" ? product.error : "No product was analyzed.");
-        }
-        setResult(product);
-        navigate({ to: "/result" });
-        return;
+      const result = await analyzeProduct(
+        validUrls,
+        budget,
+        request.requirements,
+        settings.saveHistory,
+        request.budgetCurrency,
+      );
+
+      const products = result.products.filter(
+        (product): product is SuccessfulProduct => product.status === "success",
+      );
+
+      const failedProducts = result.products.filter(
+        (product): product is FailedProduct => product.status === "error",
+      );
+      if (products.length === 0) {
+        throw new Error(
+          failedProducts.length
+            ? failedProducts.map((failure) => `${failure.url}: ${failure.error}`).join("\n")
+            : "No products were analyzed successfully.",
+        );
       }
 
-      const products = await Promise.all(validUrls.map(async (productUrl) => {
-        const result = await analyzeProduct(productUrl, budget, request.requirements, settings.saveHistory);
-        console.log(result);
-        const product = result.products[0];
-        if (!product || product.status !== "success") {
-          throw new Error(product?.status === "error" ? product.error : `No result for ${productUrl}.`);
+      setResult(products[0]!);
+      setAnalysisFailures(failedProducts);
+
+      if (validUrls.length === 1) {
+        navigate({ to: "/result" });
+      } else if (products.length === 1) {
+        navigate({ to: "/result" });
+      } else {
+        const pairs = products.flatMap((productA, productAIndex) =>
+          products.slice(productAIndex + 1).map((productB, offset) => ({
+            productA,
+            productB,
+            productAIndex,
+            productBIndex: productAIndex + offset + 1,
+          })),
+        );
+        let pairwiseComparisons: ComparisonResult["pairwiseComparisons"] = [];
+        let comparisonError: string | undefined;
+        try {
+          pairwiseComparisons = await Promise.all(
+            pairs.map(async ({ productA, productB, productAIndex, productBIndex }) => ({
+              productAIndex,
+              productBIndex,
+              result: await compareProductsApi(productA, productB),
+            })),
+          );
+        } catch (compareError) {
+          console.error(compareError);
+          comparisonError = "Pairwise tie-break data is unavailable; results are shown in overall-score order.";
         }
-        return product;
-      }));
-      const firstProduct = products[0];
-      if (!firstProduct) throw new Error("No products were analyzed.");
-      setResult(firstProduct);
-      setComparison({ products });
-      navigate({ to: "/comparison" });
+        setComparison({
+          products,
+          failedProducts,
+          pairwiseComparisons,
+          ...(comparisonError ? { comparisonError } : {}),
+        });
+        navigate({ to: "/comparison" });
+      }
     } catch (err) {
       console.error(err);
       setError(err instanceof Error ? err.message : "Analysis failed. Please try again.");
@@ -237,7 +292,7 @@ export function WorkspaceScreen() {
     { name: "Skip", value: analytics.skip_count, color: "#fb7185" },
   ] : [];
   return <Screen name="workspace"><div className="workspace-layout">
-    <motion.form initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel workspace-panel" onSubmit={submit}><div className="panel-heading"><p className="eyebrow">New analysis</p><h1>What are you thinking of buying?</h1></div><fieldset className="url-fieldset"><legend>Product URL{urls.length > 1 ? "s" : ""}</legend>{urls.map((url, index) => <div className="input-row" key={index}><input type="url" required value={url} onChange={(e) => updateUrl(index, e.target.value)} placeholder={`Paste product URL ${index + 1}`} aria-label={`Product URL ${index + 1}`} />{index === 0 && urls.length < 3 ? <button type="button" className="icon-button add-url" onClick={addUrl} aria-label="Add another product URL"><Plus /></button> : index > 0 ? <button type="button" className="icon-button" onClick={() => removeUrl(index)} aria-label={`Remove product URL ${index + 1}`}><X /></button> : null}</div>)}</fieldset><div className="chips" aria-label="Examples">{examples.map((example) => <button key={example.label} type="button" onClick={() => updateUrl(0, example.url)}>{example.label}</button>)}</div><label>Budget<input value={request.budget} onChange={(e) => setRequest({ ...request, budget: e.target.value })} placeholder="e.g. Under ₹10,000" /></label><label>What matters most?<textarea value={request.requirements} onChange={(e) => setRequest({ ...request, requirements: e.target.value })} placeholder="Comfort, durability, battery life…" /></label>{error && <p className="analysis-error" role="alert">{error}</p>}<button className="action-button primary-action" type="submit" disabled={loading}><Sparkles className="size-5" />{loading ? "Analyzing…" : urls.length > 1 ? "Compare" : "Analyze"}</button></motion.form>
+    <motion.form initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel workspace-panel" onSubmit={submit}><div className="panel-heading"><p className="eyebrow">New analysis</p><h1>What are you thinking of buying?</h1></div><fieldset className="url-fieldset"><legend>Product URL{urls.length > 1 ? "s" : ""}</legend>{urls.map((url, index) => <div className="input-row" key={index}><input type="url" required value={url} onChange={(e) => updateUrl(index, e.target.value)} placeholder={`Paste product URL ${index + 1}`} aria-label={`Product URL ${index + 1}`} />{index === 0 && urls.length < 3 ? <button type="button" className="icon-button add-url" onClick={addUrl} aria-label="Add another product URL"><Plus /></button> : index > 0 ? <button type="button" className="icon-button" onClick={() => removeUrl(index)} aria-label={`Remove product URL ${index + 1}`}><X /></button> : null}</div>)}</fieldset><div className="chips" aria-label="Examples">{examples.map((example) => <button key={example.label} type="button" onClick={() => updateUrl(0, example.url)}>{example.label}</button>)}</div><div className="budget-fields"><label>Budget<input inputMode="decimal" value={request.budget} onChange={(e) => setRequest({ ...request, budget: e.target.value })} placeholder="e.g. 10000" /></label><label>Currency<select value={request.budgetCurrency} onChange={(e) => setRequest({ ...request, budgetCurrency: e.target.value })}><option value="INR">India — INR (₹)</option><option value="USD">United States — USD ($)</option><option value="GBP">United Kingdom — GBP (£)</option><option value="EUR">Eurozone — EUR (€)</option></select></label></div><label>What matters most?<textarea value={request.requirements} onChange={(e) => setRequest({ ...request, requirements: e.target.value })} placeholder="Comfort, durability, battery life…" /></label>{error && <p className="analysis-error" role="alert">{error}</p>}<button className="action-button primary-action" type="submit" disabled={loading}><Sparkles className="size-5" />{loading ? "Analyzing…" : urls.length > 1 ? "Compare" : "Analyze"}</button></motion.form>
     <section className="analytics-dashboard" aria-label="Analytics">
       <div className="glass-panel analytics-cards">
         <label className="analytics-filter">Analytics period<select value={analyticsDays ?? "all"} onChange={(event) => setAnalyticsDays(event.target.value === "all" ? undefined : Number(event.target.value))}><option value={7}>Last 7 Days</option><option value={30}>Last 30 Days</option><option value={90}>Last 90 Days</option><option value="all">All Time</option></select></label>
@@ -335,13 +390,13 @@ function formatPrice(
   }
 }
 export function AnalyzingScreen() {
-  const navigate = useNavigate(); const { request } = useAnsme(); const [step, setStep] = useState(0); const items = ["Fetching product details", "Reading reviews", "Finding common complaints", "Checking requirements", "Generating verdict"];
+  const navigate = useNavigate(); const { request } = useAnsme(); const [step, setStep] = useState(0); const items = ["Fetching product listing", "Checking extracted price and rating", "Matching listing text to requirements", "Checking available data confidence", "Generating verdict"];
   useEffect(() => { const timer = window.setInterval(() => setStep((current) => Math.min(current + 1, items.length)), 750); return () => window.clearInterval(timer); }, [items.length]);
   useEffect(() => { if (step === items.length) navigate({ to: request.urls.length >= 2 ? "/comparison" : "/result" }); }, [items.length, navigate, request.urls.length, step]);
   return <Screen name="analyzing" nav={false}><motion.section initial={{ opacity: 0, scale: .98 }} animate={{ opacity: 1, scale: 1 }} className="glass-panel analyzing-panel"><div className="loading-mark"><Search /></div><p className="eyebrow">Evidence check</p><h1>{step < 3 ? "Reading between the stars…" : "Building your verdict…"}</h1><div className="checklist">{items.map((item, index) => <motion.div key={item} animate={{ opacity: index <= step ? 1 : .42 }}><span className={index < step ? "done" : index === step ? "current" : ""}>{index < step ? <Check /> : index + 1}</span>{item}</motion.div>)}</div></motion.section></Screen>;
 }
 export function ResultScreen() {
-  const { result } = useAnsme();
+  const { result, analysisFailures } = useAnsme();
   const [copyMessage, setCopyMessage] = useState("");
 
   async function copyAnalysis() {
@@ -395,6 +450,11 @@ export function ResultScreen() {
   return <Screen name="result" scroll>
     <motion.section initial={{ opacity: 0, y: 12 }} animate={{ opacity: 1, y: 0 }} className="glass-panel result-panel">
       {result.history_save_error && <p className="analysis-error" role="status">{result.history_save_error}</p>}
+      {result.budget_status === "unverified" && <p className="analysis-error" role="status">The budget was not applied because its currency could not be verified against this product's extracted price.</p>}
+      {analysisFailures.length > 0 && <div className="analysis-error" role="status">
+        <p>Some submitted products could not be analyzed. This successful product result is still available:</p>
+        <ul>{analysisFailures.map((failure) => <li key={failure.url}>{failure.url}: {failure.error}</li>)}</ul>
+      </div>}
       <div className="result-hero">
         <div className="result-hero-copy">
           <p className="eyebrow">ANSME verdict</p>
@@ -544,18 +604,42 @@ export function ComparisonScreen() {
     return <Screen name="comparison"><div className="glass-panel">No comparison available.</div></Screen>;
   }
   const products = comparison.products;
-  const ranked = [...products].sort((a, b) => b.overall_score - a.overall_score);
+  const scoreRanked = [...products].sort((a, b) => b.overall_score - a.overall_score);
+  const pairwiseComplete = !comparison.comparisonError
+    && comparison.pairwiseComparisons.length === products.length * (products.length - 1) / 2;
+  const pairwiseWins = products.map(() => 0);
+  if (pairwiseComplete) {
+    for (const pair of comparison.pairwiseComparisons) {
+      if (pair.result.winning_key === "product_a") {
+        pairwiseWins[pair.productAIndex] = (pairwiseWins[pair.productAIndex] ?? 0) + 1;
+      }
+      if (pair.result.winning_key === "product_b") {
+        pairwiseWins[pair.productBIndex] = (pairwiseWins[pair.productBIndex] ?? 0) + 1;
+      }
+    }
+  }
+  const ranked = pairwiseComplete
+    ? products.map((product, index) => ({ product, index }))
+        .sort((a, b) => pairwiseWins[b.index]! - pairwiseWins[a.index]!
+          || b.product.overall_score - a.product.overall_score)
+        .map(({ product }) => product)
+    : scoreRanked;
   const leader = ranked[0]!;
   const runnerUp = ranked[1]!;
-  const scoreGap = leader.overall_score - runnerUp.overall_score;
-  const tied = scoreGap <= 0.05;
+  const scoreGap = scoreRanked[0]!.overall_score - scoreRanked[1]!.overall_score;
+  const leaderWins = pairwiseWins[products.indexOf(leader)] ?? 0;
+  const runnerUpWins = pairwiseWins[products.indexOf(runnerUp)] ?? 0;
+  const tied = pairwiseComplete
+    ? leaderWins === runnerUpWins
+    : scoreGap <= 0.05;
   const leaderConfidence = confidencePercent(leader);
   const leaderConfidenceLabel = leaderConfidence === null ? "unavailable" : `${leaderConfidence}%`;
   const insufficientData = leaderConfidence === null || leaderConfidence < 70;
   const budgetText = request.budget.trim();
-  const budgetCurrency = currencyFromText(budgetText);
+  const budgetCurrency = request.budgetCurrency;
   const budgetUnverified = budgetText.length > 0 && (
-    !budgetCurrency
+    products.some((product) => product.budget_status === "unverified")
+    || !budgetCurrency
     || !products.every((product) =>
       product.price !== null
       && product.price_currency?.toUpperCase() === budgetCurrency,
@@ -619,11 +703,17 @@ export function ComparisonScreen() {
       <p className="eyebrow">Head-to-head decision</p>
       {products.find((product) => product.history_save_error)?.history_save_error
         && <p className="analysis-error" role="status">One or more analyses completed but could not be saved to your history.</p>}
+      {comparison.comparisonError && <p className="analysis-error" role="status">{comparison.comparisonError}</p>}
+      {comparison.failedProducts.length > 0 && <div className="analysis-error" role="status">
+        <p>Some submitted products could not be analyzed. The comparison includes all successful products:</p>
+        <ul>{comparison.failedProducts.map((failure) => <li key={failure.url}>{failure.url}: {failure.error}</li>)}</ul>
+      </div>}
       <div className={`comparison-verdict${undecided ? " undecided" : ""}`}>
-        <div><span>{tied ? "The scores are tied" : budgetUnverified ? "The budget currency could not be matched to every price" : insufficientData ? "The scoring data is incomplete" : "Deterministic ANSME recommendation"}</span><h1>{banner}</h1></div>
+        <div><span>{tied ? pairwiseComplete ? "No clear pairwise leader" : "The scores are tied" : budgetUnverified ? "The budget currency could not be matched to every price" : insufficientData ? "The scoring data is incomplete" : "Deterministic ANSME recommendation"}</span><h1>{banner}</h1></div>
         {selected && <p>{selected.title} · {selected.verdict} · {selected.overall_score.toFixed(1)}/10</p>}
+        {hasRequirements && <p>Requirements match is measured from listing text and shown separately; it does not affect the score ranking.</p>}
         {tied
-          ? <p>There is no clear score leader. Review the trade-offs below before choosing.</p>
+          ? <p>There is no unique leader from the available score, rating, and comparable-price data. Review the trade-offs below before choosing.</p>
           : budgetUnverified
             ? <p>The supplied budget affects the deterministic scores, but its currency is missing or does not match every product price. The score ranking is not a reliable buying recommendation.</p>
             : insufficientData && <p>The score leader has {leaderConfidenceLabel} confidence. ANSME cannot make a reliable pick from the available price and rating data.</p>}
@@ -682,7 +772,8 @@ export function ComparisonScreen() {
         {products.some((product) => product.price !== null) && (pricesComparable && cheapest && priciest && priceSpread !== null
           ? <p className="price-difference">Price spread: <strong>{formatPrice(priceSpread, sharedCurrency)}</strong>{priceSpread > 0 && priciest.price! > 0 && ` (${(priceSpread / priciest.price! * 100).toFixed(1)}% of the higher price)`}. Lowest listed: {cheapest.title || cheapest.url}.</p>
           : <p className="empty-state">Price differences are omitted because both prices and their currencies are not verified as comparable.</p>)}
-      </section>
+          {hasRequirementMatch && <p className="empty-state">Requirements match is a lexical comparison against the available product listing text; it is not incorporated into the overall score.</p>}
+        </section>
 
       <section className="winner">
         <Trophy aria-hidden="true" />
@@ -690,14 +781,16 @@ export function ComparisonScreen() {
           <small>{selected ? "WHY THIS PRODUCT LEADS" : "WHAT THE SCORES SAY"}</small>
           {selected
             ? <>
-                <strong>{selected.title || selected.url} leads by {scoreGap.toFixed(1)} overall points.</strong>
+                <strong>{pairwiseComplete
+                  ? `${selected.title || selected.url} wins ${leaderWins} of ${products.length - 1} pairwise comparisons.`
+                  : `${selected.title || selected.url} has the highest overall score.`}</strong>
                 {breakdownAdvantage && breakdownAdvantage.value !== breakdownAdvantage.other && <p>The largest score contribution lead is {breakdownAdvantage.label}: {breakdownAdvantage.value.toFixed(2)} vs {breakdownAdvantage.other.toFixed(2)}. These are the scoring engine's weighted contributions.</p>}
                 {selectedEvidence && <p>Available supporting evidence includes: “{selectedEvidence.snippet}”</p>}
                 {selectedConcerns && <p>Trade-off to consider: “{selectedConcerns.snippet}”</p>}
                 {tradeoff && <p>Alternative to weigh: {tradeoff}</p>}
               </>
             : tied
-              ? <strong>Both products have the same overall score ({leader.overall_score.toFixed(1)}/10). No winner is claimed.</strong>
+              ? <strong>No winner is claimed because the comparison data does not identify a unique leader.</strong>
               : budgetUnverified
                 ? <strong>The score ranking cannot be trusted as a buying recommendation until the budget and all listed prices are confirmed in the same currency.</strong>
                 : <strong>{leader.title || leader.url} has the highest score, but its available confidence data is too limited to recommend it.</strong>}
