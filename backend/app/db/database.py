@@ -45,10 +45,11 @@ def _get_database_url() -> str:
             f"The {DATABASE_URL_ENV_VAR} environment variable is not set."
         )
 
-    # Some providers emit the legacy "postgres://" scheme, which SQLAlchemy
-    # 2.0 no longer accepts.
+    # PostgreSQL URLs must explicitly use the installed psycopg2 dialect.
     if url.startswith("postgres://"):
-        url = "postgresql://" + url[len("postgres://"):]
+        url = url.replace("postgres://", "postgresql+psycopg2://", 1)
+    elif url.startswith("postgresql://"):
+        url = url.replace("postgresql://", "postgresql+psycopg2://", 1)
     return url
 
 
